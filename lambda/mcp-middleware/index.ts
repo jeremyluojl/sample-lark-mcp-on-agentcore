@@ -31,7 +31,7 @@ interface LambdaEvent {
   headers?: Record<string, string>;
   httpMethod?: string;
   path?: string;
-  requestContext?: { http?: { method?: string } };
+  requestContext?: { http?: { method?: string }; elb?: { targetGroupArn?: string } };
 }
 
 async function loadKeys(): Promise<void> {
@@ -112,9 +112,44 @@ interface LambdaResponse {
 // would cross user boundaries.
 export async function handler(event: LambdaEvent) {
   const r = await handle(event) as LambdaResponse;
-  return {
+  const out = {
+    // ALB requires isBase64Encoded + headers on every Lambda response (else 502).
+    isBase64Encoded: false,
     ...r,
     headers: { ...(r.headers || {}), 'Cache-Control': 'no-store' },
+  };
+  const bytes = Buffer.byteLength(JSON.stringify(out), 'utf8');
+  if (bytes > MAX_RESPONSE_BYTES) return responseTooLarge(event, bytes);
+  return out;
+}
+
+// ALB → Lambda caps the WHOLE response JSON (headers + escaped body) at 1 MB;
+// API Gateway allowed ~6 MB. A lark-cli result can exceed that (big doc/base
+// reads), and an over-limit response surfaces as a bare ALB 502 the agent cannot
+// act on. Leave headroom and answer with a well-formed MCP result instead, so the
+// agent sees the same self-explanatory output_too_large error the container
+// emits for its own 10 MB buffer cap, and narrows the query.
+const MAX_RESPONSE_BYTES = 950_000;
+
+function responseTooLarge(event: LambdaEvent, bytes: number) {
+  const raw = event.isBase64Encoded ? Buffer.from(event.body || '', 'base64').toString() : event.body || '';
+  let id: unknown = null;
+  let method = '';
+  try {
+    const req = JSON.parse(raw);
+    id = req?.id ?? null;
+    method = typeof req?.method === 'string' ? req.method : '';
+  } catch { /* non-JSON request: answer with a null id */ }
+  log('WARN', 'response_too_large', { bytes, limit: MAX_RESPONSE_BYTES, method });
+  const message = `Tool output (${bytes} bytes) exceeds the ${MAX_RESPONSE_BYTES}-byte response limit of this endpoint; narrow the query (pagination, filters, fewer fields) and retry.`;
+  const rpc = method === 'tools/call'
+    ? { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'output_too_large', message }) }], isError: true } }
+    : { jsonrpc: '2.0', id, error: { code: -32000, message } };
+  return {
+    isBase64Encoded: false,
+    statusCode: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' },
+    body: `event: message\ndata: ${JSON.stringify(rpc)}\n\n`,
   };
 }
 

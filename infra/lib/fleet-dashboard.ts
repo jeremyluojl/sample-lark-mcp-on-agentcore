@@ -61,9 +61,9 @@ export class FleetDashboardStack extends cdk.Stack {
         left: [search("SEARCH(' {AWS/Lambda,FunctionName} LarkMcpOnAgentCore MetricName=\"Errors\" ', 'Sum', 300)", "Errors")],
       }),
       new cloudwatch.GraphWidget({
-        title: "API Gateway 5XX (all apps)",
+        title: "Origin ALB 5XX (all apps)",
         width: 12,
-        left: [search("SEARCH(' {AWS/ApiGateway,ApiName} lark-mcp-on-agentcore-oauth MetricName=\"5XXError\" ', 'Sum', 300)", "5XXError")],
+        left: [search("SEARCH(' {AWS/ApplicationELB,LoadBalancer} lmcp-alb MetricName=\"HTTPCode_ELB_5XX_Count\" ', 'Sum', 300)", "ELB 5XX")],
       }),
     );
 

@@ -106,9 +106,29 @@ interface LambdaEvent {
   httpMethod?: string;
   path?: string;
   rawPath?: string;
-  requestContext?: { http?: { method?: string; path?: string }; domainName?: string };
+  // `elb` is present only on Application Load Balancer events (the private-ALB
+  // origin); `http`/`domainName` come from API Gateway-style events (unit tests,
+  // legacy deployments).
+  requestContext?: { http?: { method?: string; path?: string }; domainName?: string; elb?: { targetGroupArn?: string } };
   queryStringParameters?: Record<string, string>;
   source?: string;
+}
+
+// An ALB passes query strings to Lambda still percent-encoded ("If the query
+// parameters are URL-encoded, the load balancer does not decode them" — ELB
+// docs), whereas API Gateway hands over decoded values. Every check below
+// (redirect_uri host allowlist, PKCE challenge, signed state/t= tokens) expects
+// decoded values, so normalize ALB events once here. decodeURIComponent (not
+// URLSearchParams) on purpose: it leaves a literal '+' untouched, matching what
+// the API Gateway path delivered, so opaque client `state` values round-trip
+// byte-for-byte. A malformed escape keeps the raw value rather than throwing.
+export function getQueryParams(event: LambdaEvent): Record<string, string> {
+  const q = event.queryStringParameters || {};
+  if (!event.requestContext?.elb) return q;
+  const safeDecode = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(q)) out[safeDecode(k)] = safeDecode(v ?? '');
+  return out;
 }
 
 // Extra hosts allowed as an OAuth *client's* redirect_uri (see /register and
@@ -419,7 +439,10 @@ export async function handler(event: LambdaEvent) {
   const result = await handle(event);
   if (event.source === 'aws.events') return result;
   const r = result as LambdaResponse;
+  // ALB rejects (502) a Lambda response that lacks isBase64Encoded/headers;
+  // every body here is text, so false is always correct.
   return {
+    isBase64Encoded: false,
     ...r,
     headers: { ...(r.headers || {}), 'Cache-Control': 'no-store' },
   };
@@ -547,7 +570,7 @@ async function handle(event: LambdaEvent) {
 
   const path = event.path || event.requestContext?.http?.path || event.rawPath || "/";
   const method = event.httpMethod || event.requestContext?.http?.method || "GET";
-  const params = event.queryStringParameters || {};
+  const params = getQueryParams(event);
   const CALLBACK_URL = getCallbackUrl(event);
 
   // AWS Security Agent domain-ownership verification (HTTP route method).

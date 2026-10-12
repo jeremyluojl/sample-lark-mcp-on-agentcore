@@ -24,6 +24,12 @@ const allowedRedirectHosts = process.env.EXTRA_ALLOWED_DOMAINS || "";
 const domainVerification = process.env.DOMAIN_VERIFICATION || "";
 // OAuth endpoint cluster: "lark" (larksuite.com) or "feishu" (feishu.cn, default).
 const larkBrand = process.env.LARKSUITE_CLI_BRAND === "lark" ? "lark" : "feishu";
+// Optional TLS for the CloudFront → internal ALB hop (see OAuthStackProps.originDomainName).
+// deploy.sh resolves ORIGIN_HOSTED_ZONE_NAME from ORIGIN_HOSTED_ZONE_ID.
+const originDomainName = process.env.ORIGIN_DOMAIN_NAME || "";
+const originHostedZoneId = process.env.ORIGIN_HOSTED_ZONE_ID || "";
+const originHostedZoneName = process.env.ORIGIN_HOSTED_ZONE_NAME || "";
+const edgeVpcCidr = process.env.EDGE_VPC_CIDR || "";
 
 // CloudFront-scope WAF must live in us-east-1 regardless of deploy region.
 // Set SKIP_WAF=1 to omit the WAF stack (e.g., for region-locked tenants).
@@ -42,6 +48,10 @@ const oauth = new OAuthStack(app, names.oauthStack, {
   allowedRedirectHosts,
   domainVerification,
   larkBrand,
+  originDomainName,
+  originHostedZoneId,
+  originHostedZoneName,
+  edgeVpcCidr,
   webAclArn: waf?.webAclArn,
   crossRegionReferences: !skipWaf,
 });

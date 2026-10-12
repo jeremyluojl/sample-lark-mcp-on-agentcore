@@ -37,8 +37,8 @@ describe("FleetDashboardStack — read-only cross-app roll-up", () => {
     expect(body).not.toContain("{LarkMcpOnAgentCore/*}");
   });
 
-  it("uses the AWS/Lambda + AWS/ApiGateway composite-token forms for vended metrics", () => {
+  it("uses the AWS/Lambda + AWS/ApplicationELB composite-token forms for vended metrics", () => {
     expect(body).toContain("{AWS/Lambda,FunctionName} LarkMcpOnAgentCore");
-    expect(body).toContain("{AWS/ApiGateway,ApiName} lark-mcp-on-agentcore-oauth");
+    expect(body).toContain("{AWS/ApplicationELB,LoadBalancer} lmcp-alb");
   });
 });

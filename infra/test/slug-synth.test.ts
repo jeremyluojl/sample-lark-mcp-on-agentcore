@@ -1,8 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { OAuthStack } from "../lib/oauth-stack";
 import { RuntimeStack } from "../lib/runtime-stack";
+
+// Full CDK synth (esbuild bundling + Docker asset fingerprinting) can exceed the
+// 5 s default when the whole suite runs in parallel — same as the other synth tests.
+vi.setConfig({ testTimeout: 30_000 });
 
 const TEST_ENV = { account: "123456789012", region: "us-west-2" };
 const SLUG = "team-a";
@@ -31,8 +35,10 @@ describe(`OAuthStack slugged synth (slug=${SLUG}) carries the slug on every phys
     t.hasResourceProperties("AWS::DynamoDB::Table", { TableName: `lark-mcp-on-agentcore-openid-map-${SLUG}` });
   });
 
-  it("REST API name is slug-suffixed", () => {
-    t.hasResourceProperties("AWS::ApiGateway::RestApi", { Name: `lark-mcp-on-agentcore-oauth-${SLUG}` });
+  it("origin ALB + target group names are slug-suffixed", () => {
+    t.hasResourceProperties("AWS::ElasticLoadBalancingV2::LoadBalancer", { Name: `lmcp-alb-${SLUG}` });
+    t.hasResourceProperties("AWS::ElasticLoadBalancingV2::TargetGroup", { Name: `lmcp-mcp-${SLUG}` });
+    t.hasResourceProperties("AWS::ElasticLoadBalancingV2::TargetGroup", { Name: `lmcp-oauth-${SLUG}` });
   });
 
   it("SNS topic is slug-suffixed", () => {
@@ -43,17 +49,17 @@ describe(`OAuthStack slugged synth (slug=${SLUG}) carries the slug on every phys
     t.hasResourceProperties("AWS::CloudWatch::Dashboard", { DashboardName: `lark-mcp-on-agentcore-${SLUG}` });
   });
 
-  it("ApiGateway alarms/dashboard watch THIS app's API, not the default's (no observability bleed)", () => {
-    // The 5xx alarm's ApiName dimension must be the slugged API, else a slug app's
-    // alarm silently watches the default gateway and never fires on its own traffic.
-    t.hasResourceProperties("AWS::CloudWatch::Alarm", {
-      Namespace: "AWS/ApiGateway",
-      Dimensions: Match.arrayWith([{ Name: "ApiName", Value: `lark-mcp-on-agentcore-oauth-${SLUG}` }]),
-    });
+  it("ALB alarm/dashboard watch THIS app's load balancer, not another app's (no observability bleed)", () => {
+    // The 5xx alarm's LoadBalancer dimension must resolve from THIS stack's ALB,
+    // else a slug app's alarm silently watches another app's ALB.
+    const alarms = Object.values(t.findResources("AWS::CloudWatch::Alarm")) as any[];
+    const albAlarm = alarms.find((a) => JSON.stringify(a.Properties?.Metrics ?? []).includes("AWS/ApplicationELB"));
+    expect(albAlarm, "ALB 5xx alarm present").toBeDefined();
+    const albLogicalId = Object.keys(t.findResources("AWS::ElasticLoadBalancingV2::LoadBalancer"))[0];
+    expect(JSON.stringify(albAlarm.Properties.Metrics)).toContain(albLogicalId);
     const dashboards = JSON.stringify(Object.values(t.findResources("AWS::CloudWatch::Dashboard")));
-    expect(dashboards).toContain(`lark-mcp-on-agentcore-oauth-${SLUG}`);
-    // And it must NOT reference the bare default API name.
-    expect(dashboards).not.toContain('"lark-mcp-on-agentcore-oauth"');
+    expect(dashboards).toContain("AWS/ApplicationELB");
+    expect(dashboards).toContain(albLogicalId);
   });
 
   it("alarm names carry the slug, AND none is undefined", () => {

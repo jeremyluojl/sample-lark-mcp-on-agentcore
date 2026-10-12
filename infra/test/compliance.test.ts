@@ -1,6 +1,7 @@
-import { describe, it, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as cdk from "aws-cdk-lib";
 import { Aspects } from "aws-cdk-lib";
+import { Annotations, Match } from "aws-cdk-lib/assertions";
 import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
 import { OAuthStack } from "../lib/oauth-stack";
 import { WafStack } from "../lib/waf-stack";
@@ -34,9 +35,10 @@ describe("cdk-nag AWS Solutions compliance", () => {
     applyOAuthStackSuppressions(stack);
     Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
-    // Synthesize — cdk-nag checks run during synthesis.
-    // If any unsuppressed ERROR-level findings exist, synthesis throws.
+    // Synthesize — cdk-nag checks run during synthesis and record findings as
+    // ERROR annotations (app.synth() itself does not throw), so assert on them.
     app.synth();
+    expectNoNagErrors(stack);
   });
 
   it("WafStack passes AWS Solutions checks", () => {
@@ -48,6 +50,7 @@ describe("cdk-nag AWS Solutions compliance", () => {
     applyWafStackSuppressions(stack);
     Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
     app.synth();
+    expectNoNagErrors(stack);
   });
 
   it("RuntimeStack passes AWS Solutions checks", () => {
@@ -59,8 +62,14 @@ describe("cdk-nag AWS Solutions compliance", () => {
     applyRuntimeStackSuppressions(stack);
     Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
     app.synth();
+    expectNoNagErrors(stack);
   });
 });
+
+function expectNoNagErrors(stack: cdk.Stack) {
+  const errors = Annotations.fromStack(stack).findError("*", Match.stringLikeRegexp("AwsSolutions-.*"));
+  expect(errors.map((e) => `${e.id}: ${String(e.entry.data).split("\n")[0]}`)).toEqual([]);
+}
 
 // ---------------------------------------------------------------------------
 // Suppressions with documented rationale
@@ -85,24 +94,8 @@ function applyOAuthStackSuppressions(stack: cdk.Stack) {
       reason: "OAuth codes table is ephemeral (TTL-based, items expire in 2 minutes). Point-in-time recovery adds cost without benefit for transient data.",
     },
     {
-      id: "AwsSolutions-APIG2",
-      reason: "API Gateway request validation is handled by the Lambda itself (it validates all parameters and returns structured errors).",
-    },
-    {
-      id: "AwsSolutions-APIG1",
-      reason: "Access logging is not required for this internal OAuth proxy — CloudFront access logs and Lambda logs provide sufficient audit trail.",
-    },
-    {
-      id: "AwsSolutions-APIG3",
-      reason: "WAF is attached at the CloudFront layer (not API Gateway directly) which provides equivalent protection.",
-    },
-    {
-      id: "AwsSolutions-APIG4",
-      reason: "Authorization is handled by the Lambda (OAuth flow endpoints must be publicly accessible for the initial redirect).",
-    },
-    {
-      id: "AwsSolutions-COG4",
-      reason: "No Cognito authorizer needed — the Lambda implements its own OAuth 2.0 authorization server.",
+      id: "AwsSolutions-S1",
+      reason: "The bucket is itself the ALB access-log destination; server access logging on it would only log the log-writer. Access is limited to the ELB log-delivery principal (enforceSSL, BLOCK_ALL, SSE-S3).",
     },
     {
       id: "AwsSolutions-CFR1",

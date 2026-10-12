@@ -20,7 +20,11 @@ describe("resolveSlug — default sentinel (empty) == today's byte-identical nam
   it("oauth client id", () => expect(n.oauthClientId).toBe("lark-mcp-on-agentcore"));
   it("dashboard", () => expect(n.dashboardName).toBe("lark-mcp-on-agentcore"));
   it("sns topic", () => expect(n.snsTopic).toBe("lark-mcp-on-agentcore-alarms"));
-  it("api name", () => expect(n.apiName).toBe("lark-mcp-on-agentcore-oauth"));
+  it("origin ALB + target group names", () => {
+    expect(n.albName).toBe("lmcp-alb");
+    expect(n.mcpTargetGroup).toBe("lmcp-mcp");
+    expect(n.oauthTargetGroup).toBe("lmcp-oauth");
+  });
   it("metric namespace", () => expect(n.metricNamespace).toBe("LarkMcpOnAgentCore"));
   it("stacks", () => {
     expect(n.oauthStack).toBe("LarkMcpOnAgentCoreOAuth");
@@ -42,11 +46,19 @@ describe("resolveSlug — slugged names (team-a)", () => {
     expect(n.codeTable).toBe("lark-mcp-on-agentcore-oauth-codes-team-a");
     expect(n.openidTable).toBe("lark-mcp-on-agentcore-openid-map-team-a");
   });
-  it("oauth client id / dashboard / sns / api", () => {
+  it("oauth client id / dashboard / sns / origin ALB + target groups", () => {
     expect(n.oauthClientId).toBe("lark-mcp-on-agentcore-team-a");
     expect(n.dashboardName).toBe("lark-mcp-on-agentcore-team-a");
     expect(n.snsTopic).toBe("lark-mcp-on-agentcore-alarms-team-a");
-    expect(n.apiName).toBe("lark-mcp-on-agentcore-oauth-team-a");
+    expect(n.albName).toBe("lmcp-alb-team-a");
+    expect(n.mcpTargetGroup).toBe("lmcp-mcp-team-a");
+    expect(n.oauthTargetGroup).toBe("lmcp-oauth-team-a");
+  });
+  it("ELB names stay within the 32-char limit for the longest valid slug", () => {
+    const longest = resolveSlug("a".repeat(20));
+    for (const name of [longest.albName, longest.mcpTargetGroup, longest.oauthTargetGroup]) {
+      expect(name.length).toBeLessThanOrEqual(32);
+    }
   });
   it("metric namespace is per-slug (slash)", () => expect(n.metricNamespace).toBe("LarkMcpOnAgentCore/team-a"));
   it("OAuth+Runtime stacks suffixed; WAF stays SHARED", () => {

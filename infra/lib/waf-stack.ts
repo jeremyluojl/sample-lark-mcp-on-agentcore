@@ -3,6 +3,32 @@ import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
 
 /**
+ * Per-IP rate limit (5-minute window) on ONE exact URI path.
+ */
+function exactPathRateRule(name: string, priority: number, uriPath: string, limit: number): wafv2.CfnWebACL.RuleProperty {
+  return {
+    name,
+    priority,
+    action: { block: {} },
+    statement: {
+      rateBasedStatement: {
+        limit,
+        aggregateKeyType: "IP",
+        scopeDownStatement: {
+          byteMatchStatement: {
+            searchString: uriPath,
+            fieldToMatch: { uriPath: {} },
+            textTransformations: [{ priority: 0, type: "NONE" }],
+            positionalConstraint: "EXACTLY",
+          },
+        },
+      },
+    },
+    visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: name, sampledRequestsEnabled: true },
+  };
+}
+
+/**
  * CloudFront-scope WAF must be deployed to us-east-1.
  * Provides rate limiting on /authorize to deter brute-force OAuth flows.
  */
@@ -65,6 +91,12 @@ export class WafStack extends cdk.Stack {
             sampledRequestsEnabled: true,
           },
         },
+        // The origin is an internal ALB (no API Gateway stage throttling any
+        // more), so the unauthenticated client endpoints get their own per-IP
+        // caps here. /register (RFC 7591 DCR) mints client_ids for anyone, and
+        // /token is the code-redemption endpoint — both are cheap to flood.
+        exactPathRateRule("rate-limit-register", 3, "/register", 50),
+        exactPathRateRule("rate-limit-token", 4, "/token", 200),
       ],
     });
 

@@ -76,10 +76,10 @@ if [ -n "$OAUTH_ENDPOINT" ]; then
   TAMPER=$(curl -s -o /dev/null -w "%{http_code}" "${OAUTH_ENDPOINT}/callback?code=fake&state=dGFtcGVyZWQ6MTIzOmZha2U")
   if [ "$TAMPER" = "403" ]; then pass "/callback 拒绝篡改的 state"; else fail "/callback → HTTP ${TAMPER} (期望 403)"; fi
 
-  # /token is defined for POST only. A GET hits an undefined method on the route,
-  # which API Gateway rejects at the edge with 403 MissingAuthenticationToken
-  # (it never reaches the Lambda, so there's no 405). Either is a correct "GET is
-  # not allowed here" — accept both so the assertion matches real AWS behavior.
+  # /token is POST-only. Behind the internal ALB the request reaches the OAuth
+  # Lambda, which answers 405; the former API Gateway origin rejected it at the
+  # edge with 403 MissingAuthenticationToken. Either is a correct "GET is not
+  # allowed here" — accept both so the assertion holds for old and new stacks.
   TOKEN_HTTP=$(curl -s -o /dev/null -w "%{http_code}" "${OAUTH_ENDPOINT}/token?user_id=test")
   if [ "$TOKEN_HTTP" = "405" ] || [ "$TOKEN_HTTP" = "403" ]; then pass "/token GET 被拒 (HTTP ${TOKEN_HTTP}, 非 POST)"; else fail "/token → HTTP ${TOKEN_HTTP} (期望 403/405)"; fi
 
@@ -120,16 +120,41 @@ if [ -n "$OAUTH_ENDPOINT" ]; then
   if [ "$EXTRA_UNK" = "400" ]; then pass "/authorize 未知 scope → 400"; else fail "/authorize unknown scope → HTTP ${EXTRA_UNK} (期望 400)"; fi
 
   # OAuth metadata response must carry Cache-Control: no-store (no stale config in caches).
-  # Use a GET (dump headers via -D), NOT a HEAD (-I): the API Gateway route only
-  # defines GET, so a HEAD hits an undefined method and returns 403 with none of
-  # the real response headers. NOTE: grep returns non-zero on no match, which
+  # Use a GET (dump headers via -D), NOT a HEAD (-I), so the assertion sees the
+  # Lambda's real response headers on every origin type. NOTE: grep returns non-zero on no match, which
   # under `set -o pipefail` would abort the ENTIRE script mid-run (silently
   # dropping every test below). Capture headers first, then guard with `|| true`.
   CACHE_HEADERS=$(curl -s -D - -o /dev/null "${OAUTH_ENDPOINT}/.well-known/oauth-authorization-server" 2>/dev/null || true)
   CACHE=$(printf '%s' "$CACHE_HEADERS" | tr -d '\r' | grep -i '^cache-control:' | tr '[:upper:]' '[:lower:]' || true)
   if echo "$CACHE" | grep -q 'no-store'; then pass "OAuth metadata 含 Cache-Control: no-store"; else fail "/.well-known cache header: ${CACHE:-<none>}"; fi
+
+  # Unlisted paths must be answered by the ALB listener default (fixed 404) and
+  # never reach a Lambda.
+  UNLISTED=$(curl -s -o /dev/null -w "%{http_code}" "${OAUTH_ENDPOINT}/definitely-not-a-route")
+  if [ "$UNLISTED" = "404" ]; then pass "未声明路径 → 404"; else fail "未声明路径 → HTTP ${UNLISTED} (期望 404)"; fi
 else
   skip "OAuth 端点未配置"
+fi
+
+# 测试 1b: 私有源站 — CloudFront 是唯一入口
+echo ""
+echo "── 私有源站 (internal ALB) ──"
+ALB_DNS=$(aws cloudformation describe-stacks --stack-name LarkMcpOnAgentCoreOAuth --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`OriginAlbDnsName`].OutputValue' --output text 2>/dev/null || echo "")
+if [ -n "$ALB_DNS" ] && [ "$ALB_DNS" != "None" ]; then
+  ALB_IPS=$(python3 -c 'import socket,sys; print(" ".join(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], 443)})))' "$ALB_DNS" 2>/dev/null || echo "")
+  if [ -n "$ALB_IPS" ] && python3 -c 'import ipaddress,sys; sys.exit(0 if all(ipaddress.ip_address(i).is_private for i in sys.argv[1:]) else 1)' $ALB_IPS; then
+    pass "ALB 仅解析到私网地址 (${ALB_IPS})"
+  else
+    fail "ALB 解析结果含公网地址或无法解析: ${ALB_IPS:-<none>}"
+  fi
+  # From outside the VPC the ALB must be unreachable (no route), i.e. connect fails.
+  DIRECT=$(curl -sk -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "https://${ALB_DNS}/mcp" 2>/dev/null || true)
+  if [ "$DIRECT" = "000" ]; then pass "公网直连 ALB 不可达"; else fail "公网直连 ALB 返回 HTTP ${DIRECT} (期望连接失败)"; fi
+  APIGW=$(aws apigateway get-rest-apis --region "$REGION" --query "items[?name=='lark-mcp-on-agentcore-oauth'].id" --output text 2>/dev/null || echo "")
+  if [ -z "$APIGW" ] || [ "$APIGW" = "None" ]; then pass "已无 API Gateway (无可绕过 CloudFront 的 execute-api 入口)"; else fail "仍存在 API Gateway: ${APIGW}"; fi
+else
+  skip "未找到 OriginAlbDnsName 输出 (旧版 API Gateway 部署?)"
 fi
 
 # 测试 2: AgentCore Runtime

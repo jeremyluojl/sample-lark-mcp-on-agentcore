@@ -837,6 +837,44 @@ fi
 if [ "$ENABLE_WAF" = "1" ]; then info "${L[waf_enabled]}"; else info "${L[waf_disabled]}"; fi
 SKIP_WAF=$([ "$ENABLE_WAF" = "1" ] && echo 0 || echo 1)
 export SKIP_WAF
+# The origin is an internal ALB: there is no API Gateway stage throttle any more,
+# so without the WAF the only rate bound is the Lambda reserved concurrency.
+[ "$ENABLE_WAF" = "1" ] || warn "${L[waf_off_no_throttle]}"
+
+# TLS on the CloudFront -> internal ALB hop (optional, recommended). Needs a
+# dedicated origin hostname inside a Route 53 PUBLIC hosted zone in this account
+# (ACM DNS validation + alias record). It is NOT a viewer domain: clients keep the
+# *.cloudfront.net URL. Env > saved config; both unset => HTTP on that hop.
+for _v in ORIGIN_DOMAIN_NAME ORIGIN_HOSTED_ZONE_ID; do
+  if [ -z "${!_v+x}" ] && [ -f "$DEPLOY_CONFIG" ]; then
+    printf -v "$_v" '%s' "$(grep "^${_v}=" "$DEPLOY_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+  fi
+done
+ORIGIN_DOMAIN_NAME="${ORIGIN_DOMAIN_NAME:-}"
+ORIGIN_HOSTED_ZONE_ID="${ORIGIN_HOSTED_ZONE_ID:-}"
+ORIGIN_HOSTED_ZONE_ID="${ORIGIN_HOSTED_ZONE_ID#/hostedzone/}"
+ORIGIN_HOSTED_ZONE_NAME=""
+if [ -n "$ORIGIN_DOMAIN_NAME" ] || [ -n "$ORIGIN_HOSTED_ZONE_ID" ]; then
+  if [ -z "$ORIGIN_DOMAIN_NAME" ] || [ -z "$ORIGIN_HOSTED_ZONE_ID" ] || \
+     [[ ! "$ORIGIN_DOMAIN_NAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || \
+     [[ ! "$ORIGIN_HOSTED_ZONE_ID" =~ ^[A-Z0-9]+$ ]]; then
+    err "$(t origin_tls_invalid "${ORIGIN_DOMAIN_NAME:-<unset>}" "${ORIGIN_HOSTED_ZONE_ID:-<unset>}")"
+    exit 1
+  fi
+  _ZONE_INFO=$(aws route53 get-hosted-zone --id "$ORIGIN_HOSTED_ZONE_ID" \
+    --query '[HostedZone.Name, HostedZone.Config.PrivateZone]' --output text 2>/dev/null || echo "")
+  ORIGIN_HOSTED_ZONE_NAME=$(echo "$_ZONE_INFO" | awk '{print $1}' | sed 's/\.$//')
+  _ZONE_PRIVATE=$(echo "$_ZONE_INFO" | awk '{print $2}')
+  if [ -z "$ORIGIN_HOSTED_ZONE_NAME" ] || [ "$_ZONE_PRIVATE" != "False" ] || \
+     [[ "$ORIGIN_DOMAIN_NAME" != *".${ORIGIN_HOSTED_ZONE_NAME}" ]]; then
+    err "$(t origin_tls_invalid "$ORIGIN_DOMAIN_NAME" "$ORIGIN_HOSTED_ZONE_ID")"
+    exit 1
+  fi
+  info "$(t origin_tls_on "$ORIGIN_DOMAIN_NAME")"
+else
+  warn "${L[origin_tls_off]}"
+fi
+export ORIGIN_DOMAIN_NAME ORIGIN_HOSTED_ZONE_ID ORIGIN_HOSTED_ZONE_NAME
 
 # Log retention. Honor LOG_RETENTION_DAYS env override; on non-interactive
 # stdin default to 90 without prompting.
@@ -1722,6 +1760,8 @@ LARK_BRAND=${LARK_BRAND}
 EXTRA_ALLOWED_DOMAINS=${EXTRA_ALLOWED_DOMAINS:-}
 DOMAIN_VERIFICATION_TOKENS=${DOMAIN_VERIFICATION_TOKENS:-}
 SKIP_WAF=${SKIP_WAF}
+ORIGIN_DOMAIN_NAME=${ORIGIN_DOMAIN_NAME:-}
+ORIGIN_HOSTED_ZONE_ID=${ORIGIN_HOSTED_ZONE_ID:-}
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-}
 AGENTCORE_IDLE_TIMEOUT=${AGENTCORE_IDLE_TIMEOUT:-600}
 ALARM_WEBHOOK_SECRET=${ALARM_WEBHOOK_SECRET:-}

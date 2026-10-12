@@ -146,7 +146,7 @@
       "alarm_desc_feishu_not_auth": "飞书未授权请求突增，可能是批量 token 失效",
       "alarm_desc_concurrency_pct": "Lambda 并发占账户配额百分比，接近限制需提额",
       "alarm_desc_throttles": "Lambda 被限流（已有用户受影响）",
-      "alarm_desc_apigw_5xx": "API Gateway 网关层 5xx 错误",
+      "alarm_desc_alb_5xx": "入口负载均衡 (内部 ALB) 5xx 错误（ALB 自身 + Lambda 返回）",
       "alarm_desc_upstream_5xx": "AgentCore 上游返回 5xx",
       "select_app_title": "选择要部署的应用:",
       "app_default_label": "默认应用  (default)",
@@ -156,7 +156,11 @@
       "app_slug_exists": "该 slug 已存在，改为部署它? (Y/n) ",
       "app_alias_prompt": "显示别名 (默认 = %s): ",
       "app_alias_taken": "✗ 别名已被占用，请换一个",
-      "deploying_app": "部署应用: %s (%s)"
+      "deploying_app": "部署应用: %s (%s)",
+      "waf_off_no_throttle": "WAF 已禁用：入口为内部 ALB（已无 API Gateway 限流），除 Lambda 预留并发外不再有请求速率限制。生产环境建议启用 WAF。",
+      "origin_tls_on": "CloudFront → 内部 ALB：HTTPS（源站域名 %s，ACM 证书 + Route 53 别名记录）",
+      "origin_tls_off": "CloudFront → 内部 ALB：HTTP（流量仅走 CloudFront VPC origin 私有链路）。如需 TLS，设置 ORIGIN_DOMAIN_NAME + ORIGIN_HOSTED_ZONE_ID（本账号的 Route 53 公有托管区）后重新部署。",
+      "origin_tls_invalid": "源站 TLS 配置无效：ORIGIN_DOMAIN_NAME=%s ORIGIN_HOSTED_ZONE_ID=%s（需为本账号 Route 53 公有托管区，且域名位于该区之下）"
     },
     "en": {
       "title": "Lark MCP on AgentCore - Deploy",
@@ -304,7 +308,7 @@
       "alarm_desc_feishu_not_auth": "Spike in Feishu not-authorized requests (possible mass token revoke)",
       "alarm_desc_concurrency_pct": "Lambda concurrency as % of account quota (near limit = need increase)",
       "alarm_desc_throttles": "Lambda throttled (users already impacted)",
-      "alarm_desc_apigw_5xx": "API Gateway 5xx errors at gateway level",
+      "alarm_desc_alb_5xx": "Origin load balancer (internal ALB) 5xx errors (ALB-generated + returned by Lambda)",
       "alarm_desc_upstream_5xx": "AgentCore upstream returned 5xx",
       "select_app_title": "Select app to deploy:",
       "app_default_label": "Default app  (default)",
@@ -314,7 +318,11 @@
       "app_slug_exists": "Slug already exists — deploy it instead? (Y/n) ",
       "app_alias_prompt": "Display alias (default = %s): ",
       "app_alias_taken": "✗ Alias already in use — pick another",
-      "deploying_app": "Deploying app: %s (%s)"
+      "deploying_app": "Deploying app: %s (%s)",
+      "waf_off_no_throttle": "WAF disabled: the origin is an internal ALB (no API Gateway throttling any more), so the only request-rate bound left is Lambda reserved concurrency. Enable the WAF for production.",
+      "origin_tls_on": "CloudFront -> internal ALB: HTTPS (origin hostname %s, ACM certificate + Route 53 alias record)",
+      "origin_tls_off": "CloudFront -> internal ALB: HTTP (traffic stays on the CloudFront VPC-origin private path). For TLS, set ORIGIN_DOMAIN_NAME + ORIGIN_HOSTED_ZONE_ID (a Route 53 public zone in this account) and redeploy.",
+      "origin_tls_invalid": "Invalid origin TLS config: ORIGIN_DOMAIN_NAME=%s ORIGIN_HOSTED_ZONE_ID=%s (must be a Route 53 PUBLIC hosted zone in this account, with the hostname inside it)"
     }
   },
   "dashboard": {
@@ -332,7 +340,7 @@
       "lambda_concurrent": "Lambda 并发",
       "alarms": "告警状态",
       "feishu_latency": "飞书 API 延迟 (ms)",
-      "api_4xx_5xx": "API Gateway 4xx / 5xx",
+      "alb_4xx_5xx": "ALB 4xx / 5xx",
       "not_authorized": "飞书未授权请求"
     },
     "en": {
@@ -349,7 +357,7 @@
       "lambda_concurrent": "Lambda Concurrent",
       "alarms": "Alarm Status",
       "feishu_latency": "Feishu API Latency (ms)",
-      "api_4xx_5xx": "API Gateway 4xx / 5xx",
+      "alb_4xx_5xx": "ALB 4xx / 5xx",
       "not_authorized": "Feishu Not Authorized"
     }
   },
@@ -363,7 +371,7 @@
       "feishu_not_auth": "飞书未授权突增",
       "concurrency_pct": "Lambda 并发过高 (%)",
       "throttles": "Lambda 被限流",
-      "apigw_5xx": "API Gateway 5xx",
+      "alb_5xx": "ALB 5xx",
       "upstream_5xx": "AgentCore 上游 5xx",
       "cmk_stragglers": "用户密钥未迁移到 CMK"
     },
@@ -376,7 +384,7 @@
       "feishu_not_auth": "Feishu Not Authorized Spike",
       "concurrency_pct": "Lambda Concurrency High (%)",
       "throttles": "Lambda Throttled",
-      "apigw_5xx": "API Gateway 5xx",
+      "alb_5xx": "ALB 5xx",
       "upstream_5xx": "AgentCore Upstream 5xx",
       "cmk_stragglers": "User Secrets Not On CMK"
     }

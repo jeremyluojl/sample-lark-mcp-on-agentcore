@@ -1,7 +1,12 @@
 import * as cdk from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as nodejs from "aws-cdk-lib/aws-lambda-nodejs";
-import * as apigateway from "aws-cdk-lib/aws-apigateway";
+import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
@@ -36,6 +41,33 @@ export interface OAuthStackProps extends cdk.StackProps {
   domainVerification?: string;
   /** Endpoint cluster for the OAuth flow: "feishu" (China) or "lark" (international). Default "feishu". */
   larkBrand?: string;
+  /**
+   * Origin hostname for TLS on the CloudFront → internal ALB hop, e.g.
+   * `lark-mcp-origin.example.com`. Requires originHostedZoneId/Name (a Route 53
+   * PUBLIC zone in this account, used for ACM DNS validation). All three unset ⇒
+   * the hop uses HTTP inside the CloudFront VPC-origin path. This is NOT a viewer
+   * domain: clients keep using the *.cloudfront.net URL.
+   */
+  originDomainName?: string;
+  originHostedZoneId?: string;
+  originHostedZoneName?: string;
+  /** CIDR for the dedicated origin VPC (only the ALB + CloudFront VPC-origin ENIs live there). */
+  edgeVpcCidr?: string;
+}
+
+/**
+ * ALB → Lambda target that relies on a caller-supplied, SCOPED invoke permission
+ * (SourceAccount + target-group SourceArn) instead of CDK's LambdaTarget, which
+ * grants the ELB service principal unconditionally. The target group depends on
+ * the permission because ELB verifies invoke rights at registration time.
+ */
+class ScopedLambdaTarget implements elbv2.IApplicationLoadBalancerTarget {
+  constructor(private readonly fn: lambda.IFunction, private readonly permission: cdk.CfnResource) {}
+
+  attachToApplicationTargetGroup(targetGroup: elbv2.IApplicationTargetGroup): elbv2.LoadBalancerTargetProps {
+    targetGroup.node.addDependency(this.permission);
+    return { targetType: elbv2.TargetType.LAMBDA, targetJson: { id: this.fn.functionArn } };
+  }
 }
 
 const LOG_RETENTION_MAP: Record<string, logs.RetentionDays> = {
@@ -303,54 +335,208 @@ export class OAuthStack extends cdk.Stack {
       resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
     }));
 
-    // Single API Gateway: all routes (OAuth + MCP). Stage-level throttling is a
-    // region-independent request-rate cap that applies even when the optional
-    // CloudFront WAF is skipped (SKIP_WAF) or bypassed by hitting execute-api
-    // directly — without it the OAuth/MCP endpoints would have no rate control.
-    const api = new apigateway.RestApi(this, "OAuthApi", {
-      restApiName: names.apiName,
-      deployOptions: {
-        throttlingRateLimit: parseInt(process.env.APIGW_RATE_LIMIT || "50", 10),
-        throttlingBurstLimit: parseInt(process.env.APIGW_BURST_LIMIT || "100", 10),
-      },
+    // ── Edge: CloudFront → VPC origin → internal ALB → Lambda ─────────────────
+    // CloudFront is the ONLY public entry point. The ALB is internal (private
+    // isolated subnets, no NAT, no route to the IGW) and reachable solely through
+    // a CloudFront VPC origin, so — unlike the former API Gateway, whose
+    // execute-api URL was publicly callable — nothing bypasses CloudFront + WAF.
+    // The Lambdas stay OUT of the VPC: ALB invokes them via the Lambda API, not
+    // over the network, so their Feishu/AgentCore egress is unchanged.
+    const vpc = new ec2.Vpc(this, "EdgeVpc", {
+      ipAddresses: ec2.IpAddresses.cidr(props.edgeVpcCidr || "10.231.0.0/24"),
+      maxAzs: 2,
+      natGateways: 0,
+      subnetConfiguration: [{ name: "origin", subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 26 }],
     });
-    const oauthIntegration = new apigateway.LambdaIntegration(oauthFn);
-    const mcpIntegration = new apigateway.LambdaIntegration(middlewareFn);
+    // VPC origins require an internet gateway ATTACHED to the VPC ("denotes that
+    // the VPC can receive traffic from the internet") even though no route table
+    // points at it — the isolated subnets keep zero internet routes.
+    const igw = new ec2.CfnInternetGateway(this, "EdgeVpcIgw", {});
+    const igwAttach = new ec2.CfnVPCGatewayAttachment(this, "EdgeVpcIgwAttach", {
+      vpcId: vpc.vpcId,
+      internetGatewayId: igw.ref,
+    });
+    // Rejected-traffic flow logs only: anything hitting the origin VPC other
+    // than CloudFront is by definition unexpected and worth seeing.
+    vpc.addFlowLog("EdgeVpcRejectFlowLog", {
+      trafficType: ec2.FlowLogTrafficType.REJECT,
+      destination: ec2.FlowLogDestination.toCloudWatchLogs(new logs.LogGroup(this, "EdgeVpcFlowLogGroup", {
+        retention: logRetention ?? DEFAULT_LOG_RETENTION,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      })),
+    });
 
-    api.root.addResource("authorize").addMethod("GET", oauthIntegration);
-    api.root.addResource("callback").addMethod("GET", oauthIntegration);
-    api.root.addResource("token").addMethod("POST", oauthIntegration);
-    api.root.addResource("register").addMethod("POST", oauthIntegration); // RFC 7591 DCR
-    const wellKnown = api.root.addResource(".well-known");
-    wellKnown.addResource("oauth-authorization-server").addMethod("GET", oauthIntegration);
-    wellKnown.addResource("oauth-protected-resource").addMethod("GET", oauthIntegration); // RFC 9728 PRM
-    // AWS Security Agent domain-ownership verification (HTTP route method).
-    // Inert unless DOMAIN_VERIFICATION is set on the OAuth Lambda (deploy.sh).
-    wellKnown
-      .addResource("aws")
-      .addResource("securityagent-domain-verification.json")
-      .addMethod("GET", oauthIntegration);
+    // TLS on the CloudFront → ALB hop needs a publicly trusted certificate whose
+    // name CloudFront can match. CloudFront validates the origin cert against the
+    // origin domain name (the viewer Host is NOT forwarded — this service has no
+    // custom viewer domain), so the cert is for a dedicated origin hostname in a
+    // Route 53 public zone the operator owns. Without one, the hop falls back to
+    // HTTP; traffic still never leaves the CloudFront → VPC-origin private path.
+    const originTls = !!(props.originDomainName && props.originHostedZoneId && props.originHostedZoneName);
+    const originPort = originTls ? 443 : 80;
 
-    // /register is unauthenticated — throttle tighter than the global stage limit.
-    const registerRate = parseInt(process.env.REGISTER_RATE_LIMIT || "5", 10);
-    const registerBurst = parseInt(process.env.REGISTER_BURST_LIMIT || "10", 10);
-    (api.deploymentStage.node.defaultChild as apigateway.CfnStage).addPropertyOverride("MethodSettings", [
-      { HttpMethod: "*", ResourcePath: "/*", ThrottlingRateLimit: parseInt(process.env.APIGW_RATE_LIMIT || "50", 10), ThrottlingBurstLimit: parseInt(process.env.APIGW_BURST_LIMIT || "100", 10) },
-      { HttpMethod: "POST", ResourcePath: "/register", ThrottlingRateLimit: registerRate, ThrottlingBurstLimit: registerBurst },
-    ]);
+    const albSg = new ec2.SecurityGroup(this, "OriginAlbSg", {
+      vpc,
+      description: "Internal origin ALB - CloudFront VPC origin traffic only",
+      // ALB -> Lambda is a Lambda API call, not a network flow: no egress needed.
+      allowAllOutbound: false,
+    });
+    const cfOriginFacing = ec2.PrefixList.fromLookup(this, "CloudFrontOriginFacing", {
+      prefixListName: "com.amazonaws.global.cloudfront.origin-facing",
+    });
+    albSg.addIngressRule(
+      ec2.Peer.prefixList(cfOriginFacing.prefixListId),
+      ec2.Port.tcp(originPort),
+      "CloudFront origin-facing (VPC origin)",
+    );
 
-    const mcpResource = api.root.addResource("mcp");
-    mcpResource.addMethod("POST", mcpIntegration);
-    mcpResource.addMethod("GET", mcpIntegration);
-    mcpResource.addMethod("DELETE", mcpIntegration);
+    const albLogBucket = new s3.Bucket(this, "OriginAlbAccessLogs", {
+      encryption: s3.BucketEncryption.S3_MANAGED, // ALB access logs support SSE-S3 only
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      lifecycleRules: [{ expiration: cdk.Duration.days(parseInt(logRetentionEnv || "90", 10) || 90) }],
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
 
-    // CloudFront (single domain for OAuth + MCP)
+    const alb = new elbv2.ApplicationLoadBalancer(this, "OriginAlb", {
+      loadBalancerName: names.albName,
+      vpc,
+      internetFacing: false,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      securityGroup: albSg,
+      dropInvalidHeaderFields: true,
+      idleTimeout: cdk.Duration.seconds(60),
+    });
+    // Per-request audit trail (client IP via X-Forwarded-For, path, status,
+    // target latency) — the former API Gateway had no access logging at all.
+    alb.logAccessLogs(albLogBucket, "alb");
+
+    let listener: elbv2.ApplicationListener;
+    let originZone: route53.IHostedZone | undefined;
+    const notFound = elbv2.ListenerAction.fixedResponse(404, {
+      contentType: "application/json",
+      messageBody: '{"error":"not_found"}',
+    });
+    if (originTls) {
+      originZone = route53.HostedZone.fromHostedZoneAttributes(this, "OriginZone", {
+        hostedZoneId: props.originHostedZoneId!,
+        zoneName: props.originHostedZoneName!,
+      });
+      const originCert = new acm.Certificate(this, "OriginCert", {
+        domainName: props.originDomainName!,
+        validation: acm.CertificateValidation.fromDns(originZone),
+      });
+      listener = alb.addListener("Https", {
+        port: 443,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [originCert],
+        sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,
+        open: false, // never auto-add 0.0.0.0/0 ingress
+        defaultAction: notFound,
+      });
+    } else {
+      listener = alb.addListener("Http", {
+        port: 80,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        open: false,
+        defaultAction: notFound,
+      });
+    }
+
+    // Lambda targets with a SCOPED invoke permission. CDK's stock LambdaTarget
+    // grants elasticloadbalancing.amazonaws.com without SourceArn/SourceAccount
+    // (confused-deputy exposure). The permission must exist before the target
+    // group registers the function, and the TG ARN is not known before the TG
+    // exists, so scope by the deterministic TG name + account instead.
+    const albTarget = (id: string, fn: lambda.IFunction, tgName: string) => {
+      const permission = new lambda.CfnPermission(this, `${id}AlbInvoke`, {
+        action: "lambda:InvokeFunction",
+        functionName: fn.functionArn,
+        principal: "elasticloadbalancing.amazonaws.com",
+        sourceAccount: this.account,
+        sourceArn: `arn:${this.partition}:elasticloadbalancing:${this.region}:${this.account}:targetgroup/${tgName}/*`,
+      });
+      return new elbv2.ApplicationTargetGroup(this, `${id}TargetGroup`, {
+        targetGroupName: tgName,
+        targetType: elbv2.TargetType.LAMBDA,
+        targets: [new ScopedLambdaTarget(fn, permission)],
+      });
+    };
+    const mcpTg = albTarget("Mcp", middlewareFn, names.mcpTargetGroup);
+    const oauthTg = albTarget("OAuth", oauthFn, names.oauthTargetGroup);
+
+    // Route table = the former API Gateway resources. Unlisted paths hit the
+    // listener default (fixed 404) and never invoke a Lambda. ALB allows at most
+    // 5 condition values per rule, hence two OAuth rules.
+    listener.addAction("Mcp", {
+      priority: 10,
+      conditions: [
+        elbv2.ListenerCondition.pathPatterns(["/mcp"]),
+        elbv2.ListenerCondition.httpRequestMethods(["POST", "GET", "DELETE"]),
+      ],
+      action: elbv2.ListenerAction.forward([mcpTg]),
+    });
+    listener.addAction("OAuthBrowser", {
+      priority: 20,
+      conditions: [elbv2.ListenerCondition.pathPatterns([
+        "/authorize",
+        "/callback",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource", // RFC 9728 PRM
+        "/.well-known/aws/securityagent-domain-verification.json", // inert unless DOMAIN_VERIFICATION is set
+      ])],
+      action: elbv2.ListenerAction.forward([oauthTg]),
+    });
+    listener.addAction("OAuthClient", {
+      priority: 30,
+      // No method condition: the Lambda answers GET /token with 405 itself.
+      conditions: [elbv2.ListenerCondition.pathPatterns(["/token", "/register"])],
+      action: elbv2.ListenerAction.forward([oauthTg]),
+    });
+
+    if (originZone) {
+      // CloudFront connects with SNI = origin domain; the record lets that name
+      // resolve to the internal ALB (private IPs only — not reachable publicly).
+      new route53.ARecord(this, "OriginAlias", {
+        zone: originZone,
+        recordName: props.originDomainName!,
+        target: route53.RecordTarget.fromAlias(new route53Targets.LoadBalancerTarget(alb)),
+      });
+    }
+
+    const vpcOrigin = new cloudfront.VpcOrigin(this, "OriginVpcOrigin", {
+      endpoint: cloudfront.VpcOriginEndpoint.applicationLoadBalancer(alb),
+      vpcOriginName: `${this.stackName}-alb`,
+      protocolPolicy: originTls ? cloudfront.OriginProtocolPolicy.HTTPS_ONLY : cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+      httpPort: 80,
+      httpsPort: 443,
+      originSslProtocols: [cloudfront.OriginSslPolicy.TLS_V1_2],
+    });
+    vpcOrigin.node.addDependency(igwAttach);
+    // The VPC origin (and so the distribution switch-over) must wait for the
+    // listener + rules AND the prefix-list ingress (a standalone
+    // SecurityGroupIngress child of albSg), or the first requests after
+    // cut-over hit a bare/closed ALB.
+    vpcOrigin.node.addDependency(listener);
+    vpcOrigin.node.addDependency(albSg);
+
+    // CloudFront (single domain for OAuth + MCP). Construct ID kept as "OAuthCF"
+    // so an existing deployment updates the distribution IN PLACE: the
+    // *.cloudfront.net domain — and therefore the Feishu redirect URL and every
+    // MCP client config — does not change.
     const distribution = new cloudfront.Distribution(this, "OAuthCF", {
       defaultBehavior: {
-        origin: new origins.RestApiOrigin(api),
+        origin: origins.VpcOrigin.withVpcOrigin(vpcOrigin, {
+          domainName: originTls ? props.originDomainName : undefined,
+          readTimeout: cdk.Duration.seconds(30),
+        }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        // Host is NOT forwarded: CloudFront sends the origin domain as Host/SNI,
+        // which is what the ALB certificate covers.
         originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
       },
       priceClass: cloudfront.PriceClass.PRICE_CLASS_200,
@@ -496,16 +682,27 @@ export class OAuthStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(alarmAction);
 
-    // API Gateway 5xx (server-side errors at the gateway level)
-    new cloudwatch.Alarm(this, "ApiGateway5xxAlarm", {
-      alarmName: an.apigw_5xx,
-      metric: new cloudwatch.Metric({
-        namespace: "AWS/ApiGateway", metricName: "5XXError",
-        dimensionsMap: { ApiName: names.apiName },
-        statistic: "Sum", period: cdk.Duration.seconds(th("apigw_5xx").period),
+    // Edge 5xx: ALB-generated (502 invalid/oversized Lambda response, 503, 504)
+    // plus 5xx returned by the Lambdas — the same "5xx seen by clients" scope the
+    // former API Gateway 5XXError alarm covered.
+    const albMetric = (metricName: string, period: cdk.Duration, label?: string) => new cloudwatch.Metric({
+      namespace: "AWS/ApplicationELB", metricName,
+      dimensionsMap: { LoadBalancer: alb.loadBalancerFullName },
+      statistic: "Sum", period, label,
+    });
+    new cloudwatch.Alarm(this, "OriginAlb5xxAlarm", {
+      alarmName: an.alb_5xx,
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(elb5xx, 0) + FILL(target5xx, 0)",
+        usingMetrics: {
+          elb5xx: albMetric("HTTPCode_ELB_5XX_Count", cdk.Duration.seconds(th("alb_5xx").period)),
+          target5xx: albMetric("HTTPCode_Target_5XX_Count", cdk.Duration.seconds(th("alb_5xx").period)),
+        },
+        period: cdk.Duration.seconds(th("alb_5xx").period),
+        label: "ALB 5xx",
       }),
-      threshold: th("apigw_5xx").threshold,
-      evaluationPeriods: th("apigw_5xx").evaluationPeriods,
+      threshold: th("alb_5xx").threshold,
+      evaluationPeriods: th("alb_5xx").evaluationPeriods,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(alarmAction);
 
@@ -668,7 +865,7 @@ export class OAuthStack extends cdk.Stack {
           cloudwatch.Alarm.fromAlarmArn(this, "RefNotAuth", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.feishu_not_auth}`),
           cloudwatch.Alarm.fromAlarmArn(this, "RefConcurrency", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.concurrency_pct}`),
           cloudwatch.Alarm.fromAlarmArn(this, "RefThrottle", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.throttles}`),
-          cloudwatch.Alarm.fromAlarmArn(this, "RefApiGw5xx", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.apigw_5xx}`),
+          cloudwatch.Alarm.fromAlarmArn(this, "RefAlb5xx", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.alb_5xx}`),
           cloudwatch.Alarm.fromAlarmArn(this, "RefOAuthErr", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.oauth_errors}`),
           cloudwatch.Alarm.fromAlarmArn(this, "RefMwErr", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.middleware_errors}`),
           cloudwatch.Alarm.fromAlarmArn(this, "RefCmkStragglers", `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:${an.cmk_stragglers}`),
@@ -766,13 +963,15 @@ export class OAuthStack extends cdk.Stack {
     );
 
     // Section: Infrastructure
-    dashboard.addWidgets(new cloudwatch.TextWidget({ markdown: `## ${dt.api_4xx_5xx}`, width: 24, height: 1 }));
+    dashboard.addWidgets(new cloudwatch.TextWidget({ markdown: `## ${dt.alb_4xx_5xx}`, width: 24, height: 1 }));
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
-        title: dt.api_4xx_5xx,
+        title: dt.alb_4xx_5xx,
         left: [
-          new cloudwatch.Metric({ namespace: "AWS/ApiGateway", metricName: "4XXError", dimensionsMap: { ApiName: names.apiName }, statistic: "Sum", period: cdk.Duration.minutes(5), label: "4xx" }),
-          new cloudwatch.Metric({ namespace: "AWS/ApiGateway", metricName: "5XXError", dimensionsMap: { ApiName: names.apiName }, statistic: "Sum", period: cdk.Duration.minutes(5), label: "5xx" }),
+          albMetric("HTTPCode_Target_4XX_Count", cdk.Duration.minutes(5), "4xx (Lambda)"),
+          albMetric("HTTPCode_ELB_4XX_Count", cdk.Duration.minutes(5), "4xx (ALB)"),
+          albMetric("HTTPCode_Target_5XX_Count", cdk.Duration.minutes(5), "5xx (Lambda)"),
+          albMetric("HTTPCode_ELB_5XX_Count", cdk.Duration.minutes(5), "5xx (ALB)"),
         ],
         width: 8,
       }),
@@ -804,6 +1003,14 @@ export class OAuthStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, "MiddlewareFunctionName", { value: middlewareFn.functionName });
     new cdk.CfnOutput(this, "OAuthEndpoint", { value: this.oauthEndpoint });
+    new cdk.CfnOutput(this, "OriginAlbDnsName", {
+      value: alb.loadBalancerDnsName,
+      description: "Internal origin ALB (private subnets; reachable only via the CloudFront VPC origin)",
+    });
+    new cdk.CfnOutput(this, "OriginProtocol", {
+      value: originTls ? `https://${props.originDomainName}` : "http (no ORIGIN_DOMAIN_NAME configured)",
+      description: "CloudFront -> ALB hop protocol",
+    });
     new cdk.CfnOutput(this, "McpEndpoint", {
       value: `${this.oauthEndpoint}/mcp`,
       description: "MCP Streamable HTTP endpoint (same domain as OAuth)",

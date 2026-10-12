@@ -41,7 +41,11 @@ export interface SlugNames {
   oauthClientId: string;
   dashboardName: string;
   snsTopic: string;
-  apiName: string;
+  /** Internal origin ALB (≤32 chars; `lmcp-alb` prefix is the fleet-dashboard SEARCH token). CDK-only. */
+  albName: string;
+  /** ALB target groups (≤32 chars). Also scope the Lambda invoke permission's SourceArn. CDK-only. */
+  mcpTargetGroup: string;
+  oauthTargetGroup: string;
   metricNamespace: string;
   oauthStack: string;
   runtimeStack: string;
@@ -66,7 +70,9 @@ export function resolveSlug(slug: string): SlugNames {
       oauthClientId: "lark-mcp-on-agentcore",
       dashboardName: "lark-mcp-on-agentcore",
       snsTopic: "lark-mcp-on-agentcore-alarms",
-      apiName: "lark-mcp-on-agentcore-oauth",
+      albName: "lmcp-alb",
+      mcpTargetGroup: "lmcp-mcp",
+      oauthTargetGroup: "lmcp-oauth",
       metricNamespace: "LarkMcpOnAgentCore",
       oauthStack: "LarkMcpOnAgentCoreOAuth",
       runtimeStack: "LarkMcpOnAgentCoreRuntime",
@@ -97,7 +103,9 @@ export function resolveSlug(slug: string): SlugNames {
     oauthClientId: `lark-mcp-on-agentcore-${slug}`,
     dashboardName: `lark-mcp-on-agentcore-${slug}`,
     snsTopic: `lark-mcp-on-agentcore-alarms-${slug}`,
-    apiName: `lark-mcp-on-agentcore-oauth-${slug}`,
+    albName: `lmcp-alb-${slug}`,                                     // ≤29 chars (slug ≤20)
+    mcpTargetGroup: `lmcp-mcp-${slug}`,
+    oauthTargetGroup: `lmcp-oauth-${slug}`,                          // ≤31 chars
     metricNamespace: `LarkMcpOnAgentCore/${slug}`,
     oauthStack: `LarkMcpOnAgentCoreOAuth-${slug}`,                   // transform #2: stack suffix
     runtimeStack: `LarkMcpOnAgentCoreRuntime-${slug}`,
