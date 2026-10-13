@@ -42,7 +42,7 @@ Parameter formats, call order, and preconditions like "check free/busy before bo
 
 > **Deploy from an ARM64 machine** (Apple Silicon Mac, or an AWS Graviton instance such as t4g / c7g). **Amazon Linux 2023** or **Ubuntu 24.04 LTS** (arm64) recommended.
 >
-> **Broad AWS permissions required.** Deployment uses CDK to create and configure CloudFormation, IAM, Lambda, API Gateway, CloudFront, DynamoDB, Secrets Manager, SSM, ECR, CloudWatch, SNS, EventBridge, KMS, and WAF, and drives the AgentCore Runtime directly via boto3 — spanning a dozen-plus services and including role creation and policy grants. **Use `AdministratorAccess` for the deploying identity** (grant it temporarily; you can revoke it after deploy). Scoping down permission-by-permission is tedious and error-prone.
+> **Broad AWS permissions required.** Deployment uses CDK to create and configure CloudFormation, IAM, Lambda, CloudFront (VPC origin), ELB (internal ALB), VPC, ACM, Route 53, DynamoDB, Secrets Manager, SSM, ECR, CloudWatch, SNS, EventBridge, KMS, and WAF, and drives the AgentCore Runtime directly via boto3 — spanning a dozen-plus services and including role creation and policy grants. **Use `AdministratorAccess` for the deploying identity** (grant it temporarily; you can revoke it after deploy). Scoping down permission-by-permission is tedious and error-prone.
 >
 > **Create the Feishu/Lark app first.** `deploy.sh` does not create the app — it only validates an existing App ID + App Secret. Before deploying, create a custom app in the Feishu ([open.feishu.cn/app](https://open.feishu.cn/app)) or Lark ([open.larksuite.com/app](https://open.larksuite.com/app)) Developer Console, copy its credentials, and enable the required scopes. Full walkthrough (including the redirect URL you configure after deploy): **[docs/app-setup_en.md](docs/app-setup_en.md)**.
 
@@ -73,7 +73,7 @@ Save and authorize in the browser when prompted. See [Connect clients](docs/conn
 
 ## Architecture
 
-Requests from a remote MCP client (Kiro / Claude Code / Codex, which self-register via DCR, or Amazon Quick with a shared Client Secret) → CloudFront → API Gateway → Middleware Lambda (MCP token verification + SigV4 signing) → AgentCore Runtime (MCP service container handles Feishu API calls). OAuth Lambda manages user authorization and auto-refreshes tokens every 30 minutes via EventBridge. All tokens encrypted in Secrets Manager (a dedicated KMS key only this service can decrypt).
+Requests from a remote MCP client (Kiro / Claude Code / Codex, which self-register via DCR, or Amazon Quick with a shared Client Secret) → CloudFront (the only public entry point) → VPC origin → internal ALB in private subnets → Middleware Lambda (MCP token verification + SigV4 signing) → AgentCore Runtime (MCP service container handles Feishu API calls). OAuth Lambda manages user authorization and auto-refreshes tokens every 30 minutes via EventBridge. All tokens encrypted in Secrets Manager (a dedicated KMS key only this service can decrypt).
 
 <p align="center">
   <img src="docs/images/architecture-en.svg" alt="Architecture" width="720">
@@ -276,7 +276,7 @@ attributions.
 
 > **需在 ARM64 机器上部署**（Apple Silicon Mac，或 AWS Graviton 实例如 t4g / c7g）。推荐 **Amazon Linux 2023** 或 **Ubuntu 24.04 LTS**（arm64）。
 >
-> **需要较大的 AWS 权限。** 部署过程用 CDK 创建并配置 CloudFormation、IAM、Lambda、API Gateway、CloudFront、DynamoDB、Secrets Manager、SSM、ECR、CloudWatch、SNS、EventBridge、KMS、WAF 等资源，并通过 boto3 直接操作 AgentCore Runtime——横跨十几个服务且含建角色、发权限。**建议部署身份直接用 `AdministratorAccess`**（临时授予即可，部署完可回收），逐项收窄权限既繁琐又容易漏。
+> **需要较大的 AWS 权限。** 部署过程用 CDK 创建并配置 CloudFormation、IAM、Lambda、CloudFront（VPC origin）、ELB（内部 ALB）、VPC、ACM、Route 53、DynamoDB、Secrets Manager、SSM、ECR、CloudWatch、SNS、EventBridge、KMS、WAF 等资源，并通过 boto3 直接操作 AgentCore Runtime——横跨十几个服务且含建角色、发权限。**建议部署身份直接用 `AdministratorAccess`**（临时授予即可，部署完可回收），逐项收窄权限既繁琐又容易漏。
 >
 > **先创建飞书 / Lark 应用。** `deploy.sh` 不会替你建应用，只校验已有的 App ID + App Secret。部署前请先在开放平台（飞书 [open.feishu.cn/app](https://open.feishu.cn/app) 或 Lark [open.larksuite.com/app](https://open.larksuite.com/app)）创建企业自建应用、拿到凭证并开通所需权限。完整步骤（含部署后要配的重定向 URL）见 **[docs/app-setup_zh.md](docs/app-setup_zh.md)**。
 
@@ -307,7 +307,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-lark-mcp-
 
 ## 架构
 
-支持远程 MCP 的客户端（Kiro / Claude Code / Codex 走 DCR 自注册，Amazon Quick 用共享 Client Secret）发起请求 → CloudFront → API Gateway → Middleware Lambda（验证 MCP Token + SigV4 签名）→ AgentCore Runtime（MCP 服务容器处理飞书 API 调用）。OAuth Lambda 负责用户授权和 Token 自动刷新（每 30 分钟），EventBridge 定时触发。所有 Token 加密存储在 Secrets Manager 中（专用 KMS 密钥，仅本服务可解密）。
+支持远程 MCP 的客户端（Kiro / Claude Code / Codex 走 DCR 自注册，Amazon Quick 用共享 Client Secret）发起请求 → CloudFront（唯一公网入口）→ VPC origin → 私有子网内的内部 ALB → Middleware Lambda（验证 MCP Token + SigV4 签名）→ AgentCore Runtime（MCP 服务容器处理飞书 API 调用）。OAuth Lambda 负责用户授权和 Token 自动刷新（每 30 分钟），EventBridge 定时触发。所有 Token 加密存储在 Secrets Manager 中（专用 KMS 密钥，仅本服务可解密）。
 
 <p align="center">
   <img src="docs/images/architecture.svg" alt="Architecture" width="720">

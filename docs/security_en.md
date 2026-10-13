@@ -147,6 +147,22 @@ When skipped, the refresh_token is not consumed. It remains valid for the next 3
 
 If refresh succeeds but subsequent storage still fails (extreme edge case), the system retries with exponential backoff up to 5 times. If all 5 attempts fail, a CRITICAL-level log `store_token_lost` is emitted, triggering the highest-priority alarm.
 
+## Private origin (CloudFront → VPC origin → internal ALB)
+
+CloudFront is the **only** public entry point. The origin is an **internal ALB** in isolated subnets of a dedicated VPC, reachable solely through a CloudFront VPC origin. The former API Gateway is gone — its `execute-api` URL was callable directly, bypassing CloudFront and the WAF.
+
+| Control | Mechanism |
+|---|---|
+| No public origin | ALB `Scheme: internal` in isolated subnets with no NAT and no route to the IGW; its DNS resolves to private IPs only. The VPC has an IGW attached only because VPC origins require one; no route table points at it. |
+| Ingress allowlist | The ALB security group admits only the CloudFront origin-facing managed prefix list (`com.amazonaws.global.cloudfront.origin-facing`) on a single port; egress is empty (ALB invokes Lambda through the Lambda API, not over the network). |
+| Route allowlist | Listener rules mirror the former API Gateway resources (`/mcp` limited to POST/GET/DELETE, `/authorize`, `/callback`, `/token`, `/register`, three `/.well-known/*`); any other path gets a fixed 404 from the ALB and never invokes a Lambda. |
+| Lambda invoke permission | The `elasticloadbalancing.amazonaws.com` grant carries `SourceAccount` + target-group `SourceArn` (CDK's stock `LambdaTarget` grants unconditionally). |
+| Origin TLS (optional, recommended) | With `ORIGIN_DOMAIN_NAME` + `ORIGIN_HOSTED_ZONE_ID` (a Route 53 public zone in this account) the ALB serves HTTPS with an ACM certificate, the VPC origin is `https-only` + TLSv1.2, and CloudFront uses that origin hostname for SNI and certificate validation; clients keep the `*.cloudfront.net` URL. Without it the hop is HTTP, but traffic stays on the CloudFront VPC-origin private path. |
+| Audit | ALB access logs go to S3 (SSE-S3, BLOCK_ALL, TLS enforced); the dedicated VPC records REJECT flow logs. |
+| Response size | ALB caps Lambda responses at 1 MB (API Gateway allowed ~6 MB). The middleware rewrites anything over 950 KB into an MCP `output_too_large` error instead of letting the ALB return an opaque 502. |
+
+Known limitation: on teardown CloudFront reclaims its VPC ENIs and `CloudFront-VPCOrigins-Service-SG` asynchronously; if VPC deletion fails, wait a few minutes and rerun teardown (not yet tested).
+
 ## WAF Rules
 
 WAFv2 deploys to us-east-1 (CloudFront scope), optionally enabled (interactive prompt during deploy, default off):
@@ -155,8 +171,10 @@ WAFv2 deploys to us-east-1 (CloudFront scope), optionally enabled (interactive p
 |------|----------|-------|---------|
 | rate-limit-authorize | 1 | 100 requests/5min/IP | Prevent brute-force on `/authorize` (OAuth initiation endpoint) |
 | rate-limit-global | 2 | 2000 requests/5min/IP | Prevent bot crawling and flood attacks across all endpoints |
+| rate-limit-register | 3 | 50 requests/5min/IP (exact path `/register`) | Unauthenticated DCR registration endpoint |
+| rate-limit-token | 4 | 200 requests/5min/IP (exact path `/token`) | Authorization-code redemption endpoint |
 
-Both rules use IP aggregation and return 403 Block when exceeded. WAF enables CloudWatch metrics and request sampling for visibility into blocked requests.
+All rules use IP aggregation and return 403 Block when exceeded. The origin no longer has API Gateway stage throttling, so with the WAF disabled the only request-rate bound left is Lambda reserved concurrency — enable it for production. WAF enables CloudWatch metrics and request sampling for visibility into blocked requests.
 
 When WAF is disabled, no charges are incurred. If WAF was previously enabled and you disable it on redeploy, deploy.sh automatically destroys the WAF stack in us-east-1.
 
@@ -233,13 +251,13 @@ The key uses `RemovalPolicy.RETAIN` (a deleted key would make every secret encry
 | Layer | Measure |
 |-------|---------|
 | Token storage | Secrets Manager, encrypted with a **per-app customer-managed KMS key (CMK)** whose key policy grants decrypt only to that app's two Lambda roles — a least-privilege `GetSecretValue` reader (no IAM/KMS-admin/AssumeRole) gets ciphertext, not plaintext. Existing secrets migrate onto the CMK transparently via the refresh loop (`UpdateSecret`, zero downtime). All reads/writes audited via CloudTrail. |
-| Token transport | AWS internal TLS + SigV4, never traverses public internet |
+| Token transport | Feishu tokens are never sent to clients; middleware → AgentCore uses TLS + SigV4; CloudFront → origin uses the VPC-origin private path (optional TLS) |
 | OAuth CSRF | HMAC-SHA256 signed state (timing-safe, 5-min expiry) |
 | MCP auth | OAuth 2.0 (PKCE; RFC 7591 DCR for self-registering clients, shared client_secret for Amazon Quick), HMAC signed token (30-day validity) |
 | Container | Stateless per-request, non-root; SIGTERM graceful shutdown with child-process tracking |
 | Script execution (`lark_exec_script`) | Boot-time frozen allowlist (only `.py` files present at build time can run); scripts/ dirs chmod 555 to prevent overwrite; path regex whitelist; `execFile` (no shell) + `cwd=/tmp` + 30s timeout + 10MB output cap; curated env (PATH/HOME/LANG only, no AWS credentials); shares concurrency semaphore and graceful-shutdown tracking |
 | App Secret | Container kicks off the Secrets Manager fetch at startup asynchronously; until it loads, `/ping` returns 503 and `tools/call` returns `server_initializing`, so traffic is gated; the secret never enters the AgentCore control plane, logs, or argv |
-| Edge protection | CloudFront; optional WAFv2 (interactive prompt during deploy, default off) |
+| Edge protection | CloudFront is the only entry point (internal ALB + VPC origin, no directly reachable origin); optional WAFv2 (interactive prompt during deploy, default off) |
 | OAuth code | DynamoDB with TTL + ConditionExpression (replay protection) |
 | Token refresh | SM write-probe before calling Feishu; on probe failure, refresh_token is NOT consumed |
 | High-risk writes | Require `_confirm: true`; otherwise return `confirmation_required` |

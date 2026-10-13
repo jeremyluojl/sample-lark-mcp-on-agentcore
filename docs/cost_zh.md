@@ -16,11 +16,12 @@
 | **固定** | KMS 客户自管密钥（用户 Token CMK） | 每应用 1 把，$1/月，部署即创建 |
 | **固定** | ECR 镜像存储 | 每次部署覆盖同一镜像，约 600 MB |
 | **固定** | EventBridge 规则 | 每 30 分钟触发一次 Lambda，免费额度内 |
+| **固定** | 内部 ALB（CloudFront VPC origin 源站） | 按小时计费，部署即产生；CloudFront VPC origin、IGW、ACM 公有证书本身不收费 |
 | **固定** | WAFv2（可选） | WebACL + 规则的月费固定 |
 | **按用量** | Secrets Manager (用户 Token) | 每个授权用户 1 个 user secret |
 | **按用量** | AgentCore Runtime | vCPU-秒 + 内存-秒，按实际 MCP 请求处理时间计费 |
 | **按用量** | Lambda 调用 | MCP 请求 → Middleware Lambda；Token 刷新 → OAuth Lambda；告警转发 → Alarm Webhook Lambda（仅在配置 webhook 时创建） |
-| **按用量** | API Gateway | 每个 MCP/OAuth 请求经过 API Gateway |
+| **按用量** | ALB LCU | 每个 MCP/OAuth 请求经过内部 ALB，低流量下 LCU 用量极小 |
 | **按用量** | CloudFront | 每个请求的数据传输 |
 | **按用量** | CloudWatch Logs | 日志摄入量和存储量随请求量增长 |
 | **按用量** | DynamoDB | OAuth 授权码的写入/读取/删除 |
@@ -38,9 +39,9 @@
 | KMS 客户自管密钥（用户 Token CMK） | $1.00/密钥/月 + $0.03/万次请求；每应用 1 把，含年度轮换 |
 | SSM Parameter Store (Standard SecureString x 2) | 免费（Standard 层无费用，仅当升级到 Advanced 时按 $0.05/参数/月计费） |
 | ECR 镜像存储 | ~$0.10/GB/月（镜像约 600 MB） |
-| WAFv2（可选，默认关） | $5/WebACL/月 + $1/规则/月 + $0.60/百万请求 |
+| WAFv2（可选，默认关） | $5/WebACL/月 + $1/规则/月（4 条规则）+ $0.60/百万请求 |
 | Lambda | $0.20/百万请求 + 计算时间（128-512 MB，10-120s） |
-| API Gateway | $3.50/百万请求 (REST API) |
+| 内部 ALB | $0.0225/小时（≈$16.4/月）+ $0.008/LCU-小时（us-east-1） |
 | CloudFront | $0.085/GB 传输 + $0.0075/万请求 (PriceClass 200) |
 | EventBridge | $1.00/百万事件（每月约 1,440 次触发，免费额度内） |
 | SNS | $0.50/百万通知 |
@@ -63,12 +64,12 @@
 | KMS CMK (1 把密钥 + 请求) | ~$1.00 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (OAuth: ~1440 次刷新 + Middleware: ~4400 次) | 免费额度内 |
-| API Gateway (~4400 请求) | 免费额度内 |
+| 内部 ALB（固定 + LCU） | ~$16.50 |
 | CloudFront (~4400 请求) | 免费额度内 |
 | CloudWatch Logs (~50 MB/月) | $0.03 |
 | DynamoDB | < $0.01 |
 | AgentCore Runtime (~3700 vCPU-秒) | 按 AWS 定价 |
-| **合计（不含 AgentCore/WAF）** | **~$6.60/月** |
+| **合计（不含 AgentCore/WAF）** | **~$23/月** |
 
 ### 100 用户（中型团队）
 
@@ -82,12 +83,12 @@
 | KMS CMK (1 把密钥 + 请求) | ~$1.00 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (~1440 刷新 + ~44000 MCP) | $0.01 (仍在免费额度边缘) |
-| API Gateway (~44000 请求) | $0.15 |
+| 内部 ALB（固定 + LCU） | ~$16.60 |
 | CloudFront (~44000 请求, ~100 MB 传输) | $0.04 |
 | CloudWatch Logs (~500 MB/月) | $0.25 |
 | DynamoDB (~100 次授权) | < $0.01 |
 | AgentCore Runtime (~37000 vCPU-秒) | 按 AWS 定价 |
-| **合计（不含 AgentCore/WAF）** | **~$43/月** |
+| **合计（不含 AgentCore/WAF）** | **~$60/月** |
 
 ### 500 用户（大型团队）
 
@@ -101,13 +102,13 @@
 | KMS CMK (1 把密钥 + 请求) | ~$1.05 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (~1440 刷新 + ~220000 MCP) | $0.20 |
-| API Gateway (~220000 请求) | $0.77 |
+| 内部 ALB（固定 + LCU） | ~$17.00 |
 | CloudFront (~220000 请求, ~500 MB 传输) | $0.20 |
 | CloudWatch Logs (~2.5 GB/月) | $1.25 |
 | DynamoDB (~500 次授权) | < $0.05 |
 | AgentCore Runtime (~185000 vCPU-秒) | 按 AWS 定价 |
-| WAFv2（推荐启用）| $7.00 + $0.13 |
-| **合计（不含 AgentCore）** | **~$212/月** |
+| WAFv2（推荐启用）| $9.00 + $0.13 |
+| **合计（不含 AgentCore）** | **~$230/月** |
 
 **注意：** AgentCore Runtime 是按实际处理时间计费的最大变量成本。具体金额取决于 AWS 定价（会随时间变化），建议查看 [AWS Bedrock AgentCore 定价页面](https://aws.amazon.com/bedrock/agentcore/pricing/) 获取最新数字。
 

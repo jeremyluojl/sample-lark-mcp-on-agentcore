@@ -4,7 +4,7 @@
 
 ## 概述
 
-系统部署时自动创建完整的可观测性基础设施：11 个 CloudWatch 告警、15 个日志 MetricFilter（6 个驱动告警 + 9 个仅供 Dashboard，其余 5 个告警基于 Lambda 内置指标或 ApiGateway 5XXError）、一个多板块 Dashboard、以及可选的飞书群 Webhook 告警推送。所有观测数据围绕两个核心问题设计：**用户能不能正常使用？** 和 **Token 有没有丢？**
+系统部署时自动创建完整的可观测性基础设施：11 个 CloudWatch 告警、15 个日志 MetricFilter（6 个驱动告警 + 9 个仅供 Dashboard，其余 5 个告警基于 Lambda 内置指标或 ALB 5xx 指标）、一个多板块 Dashboard、以及可选的飞书群 Webhook 告警推送。所有观测数据围绕两个核心问题设计：**用户能不能正常使用？** 和 **Token 有没有丢？**
 
 ## 告警（11 个）
 
@@ -20,7 +20,7 @@
 | 6 | FeishuNotAuth | MetricFilter: `feishu_not_authorized` | >= 10 | 300s | 2 | 大量用户 Token 无效 — 可能发生批量 Token 吊销或 App 配置变更 |
 | 7 | Concurrency | Lambda ConcurrentExecutions (Middleware) | >= 80% 配额（默认 1000） | 60s | 3 | Lambda 并发接近上限，可能导致后续请求被限流。**注意**：阈值按 `LAMBDA_CONCURRENCY_QUOTA` 环境变量计算（默认 1000），未自动检测账户实际配额；账户配额非默认值时需在部署前设置该变量 |
 | 8 | Throttles | Lambda Throttles (Middleware) | >= 1 | 300s | 1 | 已发生限流 — 用户请求被拒绝 |
-| 9 | ApiGateway5xx | AWS/ApiGateway 5XXError | >= 5 | 300s | 2 | API 网关层面服务端错误（非 Lambda 错误，如集成超时） |
+| 9 | OriginAlb5xx | AWS/ApplicationELB HTTPCode_ELB_5XX_Count + HTTPCode_Target_5XX_Count | >= 5 | 300s | 2 | 入口 ALB 5xx：ALB 自身产生（如 Lambda 响应无效/超过 1 MB → 502、超时 → 504）+ Lambda 返回的 5xx |
 | 10 | AgentCore5xx | MetricFilter: `agentcore_5xx` | >= 3 | 300s | 1 | AgentCore 上游返回 5xx — Runtime 容器问题或 AWS 服务故障 |
 | 11 | CmkStragglers | MetricFilter: `refresh_cycle` ($.stragglers) | > 0 | 1800s | 4 | 刷新周期后仍**未**迁移到本应用 CMK 的用户 Token secret 数。健康迁移会收敛到 0；持续 > 0 说明密钥卡住或配错（如缺 `kms:Encrypt`）。长周期 + 4 个评估周期，使部署后正常收敛窗口不误报 |
 
@@ -28,7 +28,7 @@
 
 ## MetricFilter（15 个）
 
-所有 MetricFilter 发布到命名空间 `LarkMcpOnAgentCore`（按应用：`LarkMcpOnAgentCore/<slug>`）。其中 6 个驱动告警（标记为"告警"），9 个仅供 Dashboard。**注意：** 另外 5 个告警（OAuthErrors / MiddlewareErrors / Concurrency / Throttles / ApiGateway5xx）使用 Lambda 内置指标或 `AWS/ApiGateway` 命名空间，不依赖 MetricFilter。
+所有 MetricFilter 发布到命名空间 `LarkMcpOnAgentCore`（按应用：`LarkMcpOnAgentCore/<slug>`）。其中 6 个驱动告警（标记为"告警"），9 个仅供 Dashboard。**注意：** 另外 5 个告警（OAuthErrors / MiddlewareErrors / Concurrency / Throttles / OriginAlb5xx）使用 Lambda 内置指标或 `AWS/ApplicationELB` 命名空间，不依赖 MetricFilter。
 
 **告警与 MetricFilter 的耦合方式：** McpLatencyAlarm 与 FeishuNotAuthAlarm 通过 `namespace + metricName` 字符串引用对应指标（CDK 中没有显式依赖），而其他告警直接调用 `filter.metric(...)`。前者意味着如果重命名或删除对应 MetricFilter 而忘了同步告警，告警会"静默失明"——CloudFormation 不会报错，CloudWatch 也只是显示 Insufficient Data。修改 MetricFilter 名称时务必同步检查 McpLatencyFilter / FeishuNotAuthorizedFilter 的引用方。
 
@@ -74,7 +74,7 @@ Dashboard 名称: `lark-mcp-on-agentcore`，自动创建，包含 5 个板块：
 - **用户**：ActiveUsers (最大值) + AuthFail (认证失败)
 
 ### 5. 基础设施
-- **API Gateway 4xx/5xx**
+- **ALB 4xx/5xx**：Lambda 返回的 4xx/5xx 与 ALB 自身产生的 4xx/5xx 分开显示
 - **Lambda 并发量**：OAuth + Middleware 的 ConcurrentExecutions (Maximum)
 - **飞书状态**：左轴 FeishuNotAuthorized，右轴 FeishuSlowLatencyMs (Average + P95)
 
@@ -92,7 +92,7 @@ Dashboard 名称: `lark-mcp-on-agentcore`，自动创建，包含 5 个板块：
 | feishu_not_auth | 30 | 10 | 5 |
 | concurrency_pct (%) | 95 | 80 | 60 |
 | throttles | 5 | 1 | 1 |
-| apigw_5xx | 20 | 5 | 2 |
+| alb_5xx | 20 | 5 | 2 |
 | upstream_5xx | 10 | 3 | 1 |
 
 （`cmk_stragglers` 不参与预设调节——它是固定的 `> 0` 收敛探针，仅在 `config/alarm-thresholds.json` 中定义。）

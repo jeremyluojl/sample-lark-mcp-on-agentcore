@@ -147,6 +147,22 @@ STATE_SECRET (root, 256-bit)
 
 如果刷新成功但后续存储仍然失败（极端情况），系统会以指数退避重试最多 5 次。5 次全部失败则记录 CRITICAL 级别日志 `store_token_lost`，触发最高优先级告警。
 
+## 私有源站（CloudFront → VPC origin → 内部 ALB）
+
+CloudFront 是**唯一**的公网入口。源站是专用 VPC 中隔离子网里的**内部 ALB**，只能经 CloudFront VPC origin 访问；原先的 API Gateway 已移除——它的 `execute-api` 地址可被直接调用，从而绕过 CloudFront 与 WAF。
+
+| 控制点 | 机制 |
+|---|---|
+| 无公网源站 | ALB `Scheme: internal`，位于无 NAT、无到 IGW 路由的隔离子网；DNS 只解析到私网 IP。VPC 挂一个 IGW 仅因为 VPC origin 要求如此，路由表并不指向它。 |
+| 入站白名单 | ALB 安全组只放行 CloudFront origin-facing 托管前缀列表（`com.amazonaws.global.cloudfront.origin-facing`）的单一端口，出站规则为空（ALB 调 Lambda 走 Lambda API，不是网络流量）。 |
+| 路由白名单 | 监听器规则与原 API Gateway 资源一一对应（`/mcp` 限 POST/GET/DELETE，`/authorize`、`/callback`、`/token`、`/register`、三个 `/.well-known/*`）；其它路径由 ALB 固定返回 404，不会触发 Lambda。 |
+| Lambda 调用权限 | `elasticloadbalancing.amazonaws.com` 的调用授权带 `SourceAccount` + 目标组 `SourceArn`（CDK 默认的 `LambdaTarget` 不带条件）。 |
+| 回源 TLS（可选，推荐） | 设置 `ORIGIN_DOMAIN_NAME` + `ORIGIN_HOSTED_ZONE_ID`（本账号 Route 53 公有托管区）后，ALB 使用 ACM 证书的 HTTPS 监听，VPC origin 为 `https-only` + TLSv1.2，CloudFront 以该源站域名做 SNI 与证书校验；客户端 URL 仍是 `*.cloudfront.net`。未设置时该段为 HTTP，但流量只走 CloudFront VPC origin 私有链路。 |
+| 审计 | ALB 访问日志写入 S3（SSE-S3、BLOCK_ALL、强制 TLS），专用 VPC 记录 REJECT 流日志。 |
+| 响应大小 | ALB → Lambda 响应上限 1 MB（API Gateway 约 6 MB）。Middleware 把超过 950 KB 的响应改写为 MCP `output_too_large` 错误，而不是让 ALB 返回无法处理的 502。 |
+
+已知限制：teardown 时 CloudFront 异步回收其在 VPC 中的 ENI 与 `CloudFront-VPCOrigins-Service-SG`，若删除 VPC 失败，等待几分钟后重跑 teardown 即可（尚未实测）。
+
 ## WAF 规则
 
 WAFv2 部署在 us-east-1（CloudFront scope），可选启用（部署时交互询问，默认关闭）：
@@ -155,8 +171,10 @@ WAFv2 部署在 us-east-1（CloudFront scope），可选启用（部署时交互
 |------|--------|------|------|
 | rate-limit-authorize | 1 | 100 请求/5分钟/IP | 防止对 `/authorize` 的暴力攻击（OAuth 发起端点） |
 | rate-limit-global | 2 | 2000 请求/5分钟/IP | 防止 bot 爬取和泛洪攻击整个站点 |
+| rate-limit-register | 3 | 50 请求/5分钟/IP（精确路径 `/register`） | 免鉴权的 DCR 注册端点 |
+| rate-limit-token | 4 | 200 请求/5分钟/IP（精确路径 `/token`） | 授权码兑换端点 |
 
-两个规则都使用 IP 聚合，超限后返回 403 Block。WAF 启用 CloudWatch 指标和请求采样，可在 AWS 控制台查看被拦截的请求详情。
+所有规则都使用 IP 聚合，超限后返回 403 Block。源站已无 API Gateway 阶段限流，WAF 关闭时只剩 Lambda 预留并发这一道速率上限，生产环境建议启用。WAF 启用 CloudWatch 指标和请求采样，可在 AWS 控制台查看被拦截的请求详情。
 
 禁用 WAF 时不会产生任何费用。如果之前启用了 WAF，重新部署时选择禁用，deploy.sh 会自动销毁 us-east-1 的 WAF stack。
 
@@ -233,13 +251,13 @@ EventBridge 每 30 分钟触发一次 Token 刷新 Lambda。选择 30 分钟的�
 | 层面 | 措施 |
 |------|------|
 | Token 存储 | Secrets Manager，使用**每应用独立的客户自管 KMS 密钥（CMK）**加密；key policy 仅把解密权授给该应用的两个 Lambda 角色——仅持 `GetSecretValue`（无 IAM/KMS 管理、无 AssumeRole）的主体只能拿到密文。存量 secret 经刷新循环用 `UpdateSecret` 透明换 key 迁移（零感知）。所有读写经 CloudTrail 审计。 |
-| Token 传输 | AWS 内网 TLS + SigV4，不经过公网 |
+| Token 传输 | 飞书 Token 不下发客户端；Middleware → AgentCore 走 TLS + SigV4；CloudFront → 源站走 VPC origin 私有链路（可选 TLS） |
 | OAuth 防 CSRF | HMAC-SHA256 签名 state（timing-safe，5 分钟过期） |
 | MCP 认证 | OAuth 2.0（PKCE；自助注册客户端走 RFC 7591 DCR，Amazon Quick 用共享 client_secret），HMAC 签名 token（30 天有效） |
 | 容器 | 无状态 per-request，非 root 运行；SIGTERM 优雅关闭并跟踪子进程 |
 | 脚本执行 (`lark_exec_script`) | 启动时冻结白名单（仅构建时存在的 `.py` 可执行）；scripts/ 目录 chmod 555 防覆盖；路径正则白名单；`execFile`（非 shell）+ `cwd=/tmp` + 30s 超时 + 10MB 输出上限；最小化 env（仅 PATH/HOME/LANG，无 AWS 凭证）；纳入并发信号量和优雅关闭追踪 |
 | App Secret | 容器启动后异步从 Secrets Manager 拉取；加载完成前 `/ping` 健康检查返回 503、tools/call 返回 `server_initializing`，避免上线前接受流量；密钥不进 AgentCore 控制面，不出现在日志/argv |
-| 边缘防护 | CloudFront；可选启用 WAFv2（部署时交互询问，默认关）|
+| 边缘防护 | CloudFront 为唯一入口（内部 ALB + VPC origin，无可直连的源站）；可选启用 WAFv2（部署时交互询问，默认关）|
 | OAuth code | DynamoDB 存储 + TTL + ConditionExpression 防重放 |
 | Token 刷新 | 调 Feishu 前 SM 写探针；写不通即跳过本轮，refresh_token 不消耗 |
 | 高风险写操作 | 必须传 `_confirm: true` 才执行；默认返回 `confirmation_required` |

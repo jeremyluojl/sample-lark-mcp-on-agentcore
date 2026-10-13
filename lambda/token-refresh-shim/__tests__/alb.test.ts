@@ -80,6 +80,21 @@ describe('getQueryParams', () => {
 });
 
 describe('ALB response contract', () => {
+  it('never derives the Feishu redirect_uri from the ALB-side Host when CALLBACK_URL is unset', async () => {
+    const orig = process.env.CALLBACK_URL;
+    process.env.CALLBACK_URL = 'SET_AFTER_DEPLOY';
+    try {
+      const r = await call({
+        path: '/authorize', httpMethod: 'GET', requestContext: ELB,
+        headers: { host: 'internal-lmcp-alb-1.us-east-1.elb.amazonaws.com' },
+        queryStringParameters: { redirect_uri: enc(QUICK_CB), code_challenge: 'c', code_challenge_method: 'S256' },
+      });
+      expect(r.statusCode).toBe(500);
+      expect(r.body).toContain('callback URL cannot be derived');
+    } finally {
+      process.env.CALLBACK_URL = orig;
+    }
+  });
   it('every HTTP response carries isBase64Encoded:false and headers', async () => {
     for (const ev of [
       { path: '/.well-known/oauth-authorization-server', httpMethod: 'GET' },

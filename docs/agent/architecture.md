@@ -11,15 +11,19 @@ rather than trusting line numbers.
 ## Request lifecycle (one tool call)
 
 Client (remote-MCP: Kiro / Claude Code / Codex via DCR, or Amazon Quick)
-  → CloudFront (HTTPS edge, optional WAFv2 rate limiting)
-  → API Gateway
+  → CloudFront (HTTPS edge, optional WAFv2 rate limiting) — the ONLY public entry
+  → CloudFront VPC origin → internal ALB (isolated subnets of a NAT-less VPC;
+    listener rules = route allowlist, unlisted paths → fixed 404; Lambdas are
+    ALB targets but stay OUT of the VPC). ALB caps a Lambda response at 1 MB and
+    passes query strings still percent-encoded (`getQueryParams` decodes them)
   → Middleware Lambda  (`lambda/mcp-middleware/index.ts`)
       · verifies the MCP token (custom HMAC-SHA256 scheme, NOT JWT)
       · re-signs the upstream call with SigV4
       · injects `X-User-Access-Token` (+ `X-Incr-Auth-Token`) headers
       · sets `Mcp-Session-Id` = `u-` + HMAC-SHA256(session key, userId) — one stable
         id per authenticated user; any client-supplied `Mcp-Session-Id` is ignored
-      · hard 25s timeout (AgentCore/API-GW budget is ~29s)
+      · hard 25s timeout (CloudFront VPC-origin read timeout is 30s)
+      · rewrites a >950KB response into an MCP `output_too_large` error (ALB 1 MB cap)
   → AgentCore Runtime container (`docker/server.js`)
       · extracts the Feishu token from the header into the child-process env
       · runs `lark-cli` as a fresh child process per tool call (24s timeout, env `LARK_CLI_TIMEOUT_MS` default 24000; 10MB stdout cap)

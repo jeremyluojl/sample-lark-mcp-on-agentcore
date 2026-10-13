@@ -143,6 +143,10 @@ const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || '').split(',').map(d => 
 // domain name, so a request can only legitimately arrive on an AWS-owned host.
 function getCallbackUrl(event: LambdaEvent): string {
   if (CALLBACK_URL_ENV && CALLBACK_URL_ENV !== 'SET_AFTER_DEPLOY') return CALLBACK_URL_ENV;
+  // Behind the internal ALB, Host is the ORIGIN name CloudFront connects to
+  // (internal-*.elb.amazonaws.com or the origin TLS hostname), never the viewer
+  // domain — deriving a Feishu redirect_uri from it would be wrong. Fail closed.
+  if (event.requestContext?.elb) return '';
   const host = event.headers?.host || event.headers?.Host || event.requestContext?.domainName || '';
   if (!host) return '';
   if (/\.(cloudfront\.net|amazonaws\.com)$/.test(host)) return `https://${host}/callback`;

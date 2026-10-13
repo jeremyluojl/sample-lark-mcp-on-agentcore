@@ -35,7 +35,8 @@ deploy.sh 是一个交互式部署脚本，完成从环境检查到端到端验�
 2. 飞书 App ID + App Secret（支持环境变量 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`，支持检测已有凭证复用）
 3. 调用飞书 API 验证凭证有效性
 4. 客户端 OAuth 回调 host 白名单（可选；不是本服务的域名——详见 [connect-mcp-clients_zh.md](connect-mcp-clients_zh.md)）
-5. WAF 启用/禁用
+5. WAF 启用/禁用（源站已无 API Gateway 限流，生产环境建议启用）
+5b. 回源 TLS（可选，无交互提示）：通过环境变量或 `.local/deploy-config` 设置 `ORIGIN_DOMAIN_NAME`（如 `lark-mcp-origin.example.com`）+ `ORIGIN_HOSTED_ZONE_ID`（本账号 Route 53 **公有**托管区，域名须在该区之下）。设置后 CDK 创建 ACM 证书（DNS 验证）与指向内部 ALB 的别名记录，CloudFront → ALB 走 HTTPS；不设置则该段为 HTTP（仍只走 CloudFront VPC origin 私有链路）。这不是客户端访问域名，客户端 URL 仍为 `*.cloudfront.net`。可选 `EDGE_VPC_CIDR`（默认 `10.231.0.0/24`）指定源站专用 VPC 网段。
 6. 日志保留天数（30/90/180/365/永不过期）
 7. AgentCore Runtime 空闲回收时长（5/10/15/30 分钟，默认 10 分钟）
 8. 告警阈值预设选择（标准/宽松/严格/自定义）
@@ -50,7 +51,7 @@ deploy.sh 是一个交互式部署脚本，完成从环境检查到端到端验�
 - 创建/更新 Secrets Manager 中的飞书 App 凭证
 - 创建 SSM SecureString：state-secret（签名根密钥）和 oauth-client-secret
 - 安装依赖（root + docker + infra）
-- `cdk deploy` 部署 Runtime Stack + WAF Stack (可选) + OAuth Stack
+- `cdk deploy` 部署 Runtime Stack + WAF Stack (可选) + OAuth Stack（含源站专用 VPC、内部 ALB、CloudFront VPC origin；首次创建 VPC origin 约需 8–10 分钟）
 
 **第 2/5 步：AgentCore Runtime**
 - 使用 boto3 创建或更新 AgentCore Runtime（含容器镜像 URI、IAM Role、环境变量）

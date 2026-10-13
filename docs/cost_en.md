@@ -16,11 +16,12 @@ No license or subscription fees. Infrastructure costs split into a small fixed p
 | **Fixed** | KMS customer-managed key (user-token CMK) | 1 key per app, $1/month; created at deploy |
 | **Fixed** | ECR image storage | Each deploy overwrites the same image, ~600 MB |
 | **Fixed** | EventBridge rule | Triggers Lambda every 30 minutes, within free tier |
+| **Fixed** | Internal ALB (CloudFront VPC-origin target) | Hourly, incurred on deploy; the CloudFront VPC origin, IGW and public ACM certificate themselves are free |
 | **Fixed** | WAFv2 (optional) | WebACL + rule monthly fees are fixed |
 | **Usage** | Secrets Manager (user tokens) | 1 user secret per authorized user |
 | **Usage** | AgentCore Runtime | vCPU-seconds + memory-seconds, billed by actual MCP request processing time |
 | **Usage** | Lambda invocations | MCP requests → Middleware Lambda; Token refresh → OAuth Lambda; Alarm relay → Alarm Webhook Lambda (only created when a webhook is configured) |
-| **Usage** | API Gateway | Every MCP/OAuth request passes through API Gateway |
+| **Usage** | ALB LCU | Every MCP/OAuth request passes through the internal ALB; LCU usage is tiny at low traffic |
 | **Usage** | CloudFront | Data transfer per request |
 | **Usage** | CloudWatch Logs | Log ingestion and storage grow with request volume |
 | **Usage** | DynamoDB | OAuth authorization code writes/reads/deletes |
@@ -38,9 +39,9 @@ No license or subscription fees. Infrastructure costs split into a small fixed p
 | KMS customer-managed key (user-token CMK) | $1.00/key/month + $0.03/10,000 requests; 1 key per app, annual rotation included |
 | SSM Parameter Store (Standard SecureString x 2) | Free (Standard tier has no charge; only Advanced tier costs $0.05/parameter/month) |
 | ECR image storage | ~$0.10/GB/month (image ~600 MB) |
-| WAFv2 (optional, default off) | $5/WebACL/month + $1/rule/month + $0.60/M requests |
+| WAFv2 (optional, default off) | $5/WebACL/month + $1/rule/month (4 rules) + $0.60/M requests |
 | Lambda | $0.20/M requests + compute time (128-512 MB, 10-120s) |
-| API Gateway | $3.50/M requests (REST API) |
+| Internal ALB | $0.0225/hour (~$16.4/month) + $0.008/LCU-hour (us-east-1) |
 | CloudFront | $0.085/GB transfer + $0.0075/10K requests (PriceClass 200) |
 | EventBridge | $1.00/M events (~1,440 triggers/month, within free tier) |
 | SNS | $0.50/M notifications |
@@ -63,12 +64,12 @@ Estimates below are based on us-west-2 pricing, assuming each user makes an aver
 | KMS CMK (1 key + requests) | ~$1.00 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (OAuth: ~1440 refresh + Middleware: ~4400) | Within free tier |
-| API Gateway (~4400 requests) | Within free tier |
+| Internal ALB (fixed + LCU) | ~$16.50 |
 | CloudFront (~4400 requests) | Within free tier |
 | CloudWatch Logs (~50 MB/month) | $0.03 |
 | DynamoDB | < $0.01 |
 | AgentCore Runtime (~3700 vCPU-seconds) | Per AWS pricing |
-| **Total (excl. AgentCore/WAF)** | **~$6.60/month** |
+| **Total (excl. AgentCore/WAF)** | **~$23/month** |
 
 ### 100 Users (Medium Team)
 
@@ -82,12 +83,12 @@ Estimates below are based on us-west-2 pricing, assuming each user makes an aver
 | KMS CMK (1 key + requests) | ~$1.00 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (~1440 refresh + ~44000 MCP) | $0.01 (still near free tier) |
-| API Gateway (~44000 requests) | $0.15 |
+| Internal ALB (fixed + LCU) | ~$16.60 |
 | CloudFront (~44000 requests, ~100 MB transfer) | $0.04 |
 | CloudWatch Logs (~500 MB/month) | $0.25 |
 | DynamoDB (~100 authorizations) | < $0.01 |
 | AgentCore Runtime (~37000 vCPU-seconds) | Per AWS pricing |
-| **Total (excl. AgentCore/WAF)** | **~$43/month** |
+| **Total (excl. AgentCore/WAF)** | **~$60/month** |
 
 ### 500 Users (Large Team)
 
@@ -101,13 +102,13 @@ Estimates below are based on us-west-2 pricing, assuming each user makes an aver
 | KMS CMK (1 key + requests) | ~$1.05 |
 | ECR (~0.6 GB) | $0.06 |
 | Lambda (~1440 refresh + ~220000 MCP) | $0.20 |
-| API Gateway (~220000 requests) | $0.77 |
+| Internal ALB (fixed + LCU) | ~$17.00 |
 | CloudFront (~220000 requests, ~500 MB transfer) | $0.20 |
 | CloudWatch Logs (~2.5 GB/month) | $1.25 |
 | DynamoDB (~500 authorizations) | < $0.05 |
 | AgentCore Runtime (~185000 vCPU-seconds) | Per AWS pricing |
-| WAFv2 (recommended at this scale) | $7.00 + $0.13 |
-| **Total (excl. AgentCore)** | **~$212/month** |
+| WAFv2 (recommended at this scale) | $9.00 + $0.13 |
+| **Total (excl. AgentCore)** | **~$230/month** |
 
 **Note:** AgentCore Runtime is the largest variable cost, billed by actual processing time. Exact amounts depend on AWS pricing (which changes over time). Refer to the [AWS Bedrock AgentCore pricing page](https://aws.amazon.com/bedrock/agentcore/pricing/) for current figures.
 

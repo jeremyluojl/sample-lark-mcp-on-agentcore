@@ -4,7 +4,7 @@
 
 ## Overview
 
-The system automatically creates comprehensive observability infrastructure during deployment: 11 CloudWatch alarms, 15 log MetricFilters (6 alarm-driving + 9 dashboard-only; the other 5 alarms use Lambda built-in metrics or `AWS/ApiGateway` 5XXError), a multi-section Dashboard, and optional Feishu group webhook alarm notifications. All observability data is designed around two core questions: **Can users access the service normally?** and **Are any tokens being lost?**
+The system automatically creates comprehensive observability infrastructure during deployment: 11 CloudWatch alarms, 15 log MetricFilters (6 alarm-driving + 9 dashboard-only; the other 5 alarms use Lambda built-in metrics or ALB 5xx metrics), a multi-section Dashboard, and optional Feishu group webhook alarm notifications. All observability data is designed around two core questions: **Can users access the service normally?** and **Are any tokens being lost?**
 
 ## Alarms (11)
 
@@ -20,7 +20,7 @@ All alarms connect to a single SNS Topic (`lark-mcp-on-agentcore-alarms`) that c
 | 6 | FeishuNotAuth | MetricFilter: `feishu_not_authorized` | >= 10 | 300s | 2 | Many users with invalid tokens — possible mass revocation or app config change |
 | 7 | Concurrency | Lambda ConcurrentExecutions (Middleware) | >= 80% of quota (default 1000) | 60s | 3 | Lambda concurrency nearing limit; subsequent requests may be throttled. **Note:** threshold is computed against `LAMBDA_CONCURRENCY_QUOTA` env var (default 1000), not auto-detected from the account. If your account quota differs, set this env var before deploy |
 | 8 | Throttles | Lambda Throttles (Middleware) | >= 1 | 300s | 1 | Throttling has occurred — user requests are being rejected |
-| 9 | ApiGateway5xx | AWS/ApiGateway 5XXError | >= 5 | 300s | 2 | Gateway-level server errors (not Lambda errors; e.g., integration timeouts) |
+| 9 | OriginAlb5xx | AWS/ApplicationELB HTTPCode_ELB_5XX_Count + HTTPCode_Target_5XX_Count | >= 5 | 300s | 2 | Origin ALB 5xx: ALB-generated (e.g. invalid or >1 MB Lambda response → 502, timeout → 504) plus 5xx returned by the Lambdas |
 | 10 | AgentCore5xx | MetricFilter: `agentcore_5xx` | >= 3 | 300s | 1 | AgentCore upstream returned 5xx — container issue or AWS service failure |
 | 11 | CmkStragglers | MetricFilter: `refresh_cycle` ($.stragglers) | > 0 | 1800s | 4 | User token secrets still **not** on the per-app CMK after a refresh cycle. Healthy migration converges to 0; staying > 0 signals a stuck/misconfigured key (e.g. missing `kms:Encrypt`). Long period + 4 eval periods so the normal post-deploy convergence window does not page |
 
@@ -28,7 +28,7 @@ Alarms treat missing data as not breaching (`treatMissingData: NOT_BREACHING`), 
 
 ## MetricFilters (15)
 
-All MetricFilters publish to namespace `LarkMcpOnAgentCore` (per-app: `LarkMcpOnAgentCore/<slug>`). 6 of them drive alarms (marked "Alarm"); the other 9 are dashboard-only. **Note:** 5 additional alarms (OAuthErrors / MiddlewareErrors / Concurrency / Throttles / ApiGateway5xx) consume Lambda built-in metrics or the `AWS/ApiGateway` namespace and do **not** depend on a MetricFilter.
+All MetricFilters publish to namespace `LarkMcpOnAgentCore` (per-app: `LarkMcpOnAgentCore/<slug>`). 6 of them drive alarms (marked "Alarm"); the other 9 are dashboard-only. **Note:** 5 additional alarms (OAuthErrors / MiddlewareErrors / Concurrency / Throttles / OriginAlb5xx) consume Lambda built-in metrics or the `AWS/ApplicationELB` namespace and do **not** depend on a MetricFilter.
 
 **Alarm-to-MetricFilter coupling:** McpLatencyAlarm and FeishuNotAuthAlarm reference their metrics by `namespace + metricName` strings (no explicit CDK dependency), whereas the other alarms call `filter.metric(...)` directly. If the corresponding MetricFilter is renamed or deleted without updating the alarm, the alarm will silently go blind — CloudFormation will not error, and CloudWatch will simply show Insufficient Data. When renaming McpLatencyFilter or FeishuNotAuthorizedFilter, always sync the alarm references.
 
@@ -74,7 +74,7 @@ Dashboard name: `lark-mcp-on-agentcore`, auto-created, contains 5 sections:
 - **Users**: ActiveUsers (Maximum) + AuthFail (auth failures)
 
 ### 5. Infrastructure
-- **API Gateway 4xx/5xx**
+- **ALB 4xx/5xx**: 4xx/5xx returned by the Lambdas shown separately from ALB-generated ones
 - **Lambda Concurrency**: OAuth + Middleware ConcurrentExecutions (Maximum)
 - **Feishu Status**: Left axis FeishuNotAuthorized, right axis FeishuSlowLatencyMs (Average + P95)
 
@@ -92,7 +92,7 @@ Three presets available during deploy, selected via arrow keys:
 | feishu_not_auth | 30 | 10 | 5 |
 | concurrency_pct (%) | 95 | 80 | 60 |
 | throttles | 5 | 1 | 1 |
-| apigw_5xx | 20 | 5 | 2 |
+| alb_5xx | 20 | 5 | 2 |
 | upstream_5xx | 10 | 3 | 1 |
 
 (`cmk_stragglers` is not preset-tunable — it is a fixed `> 0` convergence canary defined only in `config/alarm-thresholds.json`.)

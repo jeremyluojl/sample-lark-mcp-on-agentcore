@@ -28,7 +28,7 @@ A: Next connection automatically triggers Feishu re-authorization.
 
 **Q: What AWS IAM permissions are needed to deploy?**
 
-A: The deploy script uses AWS CDK to create IAM Roles, Lambda, API Gateway, CloudFront, DynamoDB, Secrets Manager, SSM, ECR, CloudWatch, SNS, EventBridge, and more. It also uses boto3 to directly manage AgentCore Runtime. The deploying user should have **AdministratorAccess** (or equivalent).
+A: The deploy script uses AWS CDK to create IAM Roles, Lambda, CloudFront, an internal ALB, VPC, ACM, Route 53, DynamoDB, Secrets Manager, SSM, ECR, CloudWatch, SNS, EventBridge, and more. It also uses boto3 to directly manage AgentCore Runtime. The deploying user should have **AdministratorAccess** (or equivalent).
 
 If your organization cannot grant AdministratorAccess, the minimum permissions must cover:
 
@@ -37,7 +37,10 @@ If your organization cannot grant AdministratorAccess, the minimum permissions m
 | CloudFormation | Full CRUD (CDK backbone) |
 | IAM | CreateRole / AttachRolePolicy / PutRolePolicy (creates roles for Lambda and Runtime) |
 | Lambda | Create / Update / GetFunction |
-| API Gateway | Full CRUD |
+| EC2 / ELB | Full CRUD on VPC, subnets, security groups, IGW, internal ALB, target groups, listeners |
+| CloudFront | CreateVpcOrigin / DeleteVpcOrigin |
+| ACM / Route 53 | RequestCertificate; validation + alias records in the origin hosted zone (only when ORIGIN_DOMAIN_NAME is set) |
+| S3 | Creates the ALB access-log bucket |
 | CloudFront | CreateDistribution / UpdateDistribution |
 | Secrets Manager | Create / Put / Get / Delete / Describe / TagResource |
 | SSM | PutParameter / GetParameter / DeleteParameter |

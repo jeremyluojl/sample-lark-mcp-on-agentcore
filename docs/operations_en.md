@@ -35,7 +35,8 @@ deploy.sh is an interactive deployment script handling the full flow from enviro
 2. Feishu App ID + App Secret (supports env vars `FEISHU_APP_ID`/`FEISHU_APP_SECRET`, detects and reuses existing credentials)
 3. Validates credentials against Feishu API
 4. Allowed client OAuth callback hosts (optional; not a domain for this service — see [connect-mcp-clients_en.md](connect-mcp-clients_en.md))
-5. WAF enable/disable
+5. WAF enable/disable (the origin no longer has API Gateway throttling — enable it for production)
+5b. Origin TLS (optional, no interactive prompt): set `ORIGIN_DOMAIN_NAME` (e.g. `lark-mcp-origin.example.com`) + `ORIGIN_HOSTED_ZONE_ID` (a Route 53 **public** hosted zone in this account containing that name) via env or `.local/deploy-config`. CDK then creates an ACM certificate (DNS-validated) and an alias record to the internal ALB, and CloudFront → ALB uses HTTPS; unset, that hop is HTTP (still only on the CloudFront VPC-origin private path). This is not the client-facing domain — clients keep the `*.cloudfront.net` URL. Optional `EDGE_VPC_CIDR` (default `10.231.0.0/24`) sets the dedicated origin VPC range.
 6. Log retention days (30/90/180/365/never expire)
 7. AgentCore Runtime idle session timeout (5/10/15/30 min, default 10 min)
 8. Alarm threshold preset selection (Standard/Relaxed/Strict/Custom)
@@ -50,7 +51,7 @@ deploy.sh is an interactive deployment script handling the full flow from enviro
 - Creates/updates Feishu app credentials in Secrets Manager
 - Creates SSM SecureStrings: state-secret (signing root key) and oauth-client-secret
 - Installs dependencies (root + docker + infra)
-- `cdk deploy` deploys Runtime Stack + WAF Stack (optional) + OAuth Stack
+- `cdk deploy` deploys Runtime Stack + WAF Stack (optional) + OAuth Stack (including the dedicated origin VPC, internal ALB and CloudFront VPC origin; creating the VPC origin takes ~8–10 minutes the first time)
 
 **Step 2/5: AgentCore Runtime**
 - Uses boto3 to create or update AgentCore Runtime (container image URI, IAM Role, environment variables)
