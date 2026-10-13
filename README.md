@@ -181,6 +181,7 @@ Spanning 22 business domains: Calendar, IM, Bitable, Mail, Docs, VC, Task, Wiki,
 | Connect clients (Kiro / Claude Code / Codex) | [docs/connect-mcp-clients_en.md](docs/connect-mcp-clients_en.md) |
 | Quick Desktop Setup (6 steps, screenshots) | [docs/quick-desktop-setup_en.md](docs/quick-desktop-setup_en.md) |
 | Security | [docs/security_en.md](docs/security_en.md) |
+| Origin TLS (CloudFront → internal ALB) | [docs/origin-tls_en.md](docs/origin-tls_en.md) |
 | Observability & Alarms | [docs/observability_en.md](docs/observability_en.md) |
 | Operations & Commands | [docs/operations_en.md](docs/operations_en.md) |
 | Releasing (version scheme) | [docs/releasing_en.md](docs/releasing_en.md) |
@@ -415,6 +416,7 @@ lark-cli 官方 20+ 个业务域 Skill 沉淀了多步操作的最佳实践—�
 | 连接客户端（Kiro / Claude Code / Codex） | [docs/connect-mcp-clients_zh.md](docs/connect-mcp-clients_zh.md) |
 | Quick Desktop 配置（图文 6 步） | [docs/quick-desktop-setup_zh.md](docs/quick-desktop-setup_zh.md) |
 | 安全设计 | [docs/security_zh.md](docs/security_zh.md) |
+| 回源 TLS（CloudFront → 内部 ALB） | [docs/origin-tls_zh.md](docs/origin-tls_zh.md) |
 | 可观测性 & 告警 | [docs/observability_zh.md](docs/observability_zh.md) |
 | 运维 & 命令 | [docs/operations_zh.md](docs/operations_zh.md) |
 | 常见问题 | [docs/faq_zh.md](docs/faq_zh.md) |

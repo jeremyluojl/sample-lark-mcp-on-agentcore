@@ -161,7 +161,7 @@ CloudFront 是**唯一**的公网入口。源站是专用 VPC 中隔离子网里
 | 入站白名单 | ALB 安全组只放行 CloudFront origin-facing 托管前缀列表（`com.amazonaws.global.cloudfront.origin-facing`）的单一端口，出站规则为空（ALB 调 Lambda 走 Lambda API，不是网络流量）。 |
 | 路由白名单 | 监听器规则与原 API Gateway 资源一一对应（`/mcp` 限 POST/GET/DELETE，`/authorize`、`/callback`、`/token`、`/register`、三个 `/.well-known/*`）；其它路径由 ALB 固定返回 404，不会触发 Lambda。 |
 | Lambda 调用权限 | `elasticloadbalancing.amazonaws.com` 的调用授权带 `SourceAccount` + 目标组 `SourceArn`（CDK 默认的 `LambdaTarget` 不带条件）。 |
-| 回源 TLS（可选，推荐） | 设置 `ORIGIN_DOMAIN_NAME` + `ORIGIN_HOSTED_ZONE_ID`（本账号 Route 53 公有托管区）后，ALB 使用 ACM 证书的 HTTPS 监听，VPC origin 为 `https-only` + TLSv1.2，CloudFront 以该源站域名做 SNI 与证书校验；客户端 URL 仍是 `*.cloudfront.net`。未设置时该段为 HTTP，但流量只走 CloudFront VPC origin 私有链路。 |
+| 回源 TLS（可选，推荐，[详情](origin-tls_zh.md)） | 设置 `ORIGIN_DOMAIN_NAME` + `ORIGIN_HOSTED_ZONE_ID`（本账号 Route 53 公有托管区）后，ALB 使用 ACM 证书的 HTTPS 监听，VPC origin 为 `https-only` + TLSv1.2，CloudFront 以该源站域名做 SNI 与证书校验；客户端 URL 仍是 `*.cloudfront.net`。未设置时该段为 HTTP，但流量只走 CloudFront VPC origin 私有链路。 |
 | 审计 | ALB 访问日志写入 S3（SSE-S3、BLOCK_ALL、强制 TLS），专用 VPC 记录 REJECT 流日志。 |
 | 响应大小 | ALB → Lambda 响应上限 1 MB（API Gateway 约 6 MB）。Middleware 把超过 950 KB 的响应改写为 MCP `output_too_large` 错误，而不是让 ALB 返回无法处理的 502。 |
 
