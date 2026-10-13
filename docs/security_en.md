@@ -151,6 +151,10 @@ If refresh succeeds but subsequent storage still fails (extreme edge case), the 
 
 CloudFront is the **only** public entry point. The origin is an **internal ALB** in isolated subnets of a dedicated VPC, reachable solely through a CloudFront VPC origin. The former API Gateway is gone — its `execute-api` URL was callable directly, bypassing CloudFront and the WAF.
 
+<p align="center"><img src="images/private-origin-architecture.png" alt="Private-origin architecture: OAuth flow and hardening points" width="900"></p>
+
+Blue dashed lines are the OAuth flow (A1–A7), orange solid lines are MCP tool calls (M1–M4), purple dotted lines are background token refresh (R1–R2). Red S badges mark hardening added by this change; grey S badges mark controls the original design already had. The diagram labels are in Chinese; editable source: [`images/private-origin-architecture.drawio`](images/private-origin-architecture.drawio).
+
 | Control | Mechanism |
 |---|---|
 | No public origin | ALB `Scheme: internal` in isolated subnets with no NAT and no route to the IGW; its DNS resolves to private IPs only. The VPC has an IGW attached only because VPC origins require one; no route table points at it. |

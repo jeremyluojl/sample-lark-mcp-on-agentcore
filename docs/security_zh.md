@@ -151,6 +151,10 @@ STATE_SECRET (root, 256-bit)
 
 CloudFront 是**唯一**的公网入口。源站是专用 VPC 中隔离子网里的**内部 ALB**，只能经 CloudFront VPC origin 访问；原先的 API Gateway 已移除——它的 `execute-api` 地址可被直接调用，从而绕过 CloudFront 与 WAF。
 
+<p align="center"><img src="images/private-origin-architecture.png" alt="私有源站改造后架构：OAuth 授权流与安全加固点" width="900"></p>
+
+图中蓝色虚线为 OAuth 授权流（A1–A7），橙色实线为 MCP 工具调用（M1–M4），紫色点线为后台 Token 刷新（R1–R2）；红色 S 标记为本次改造新增的加固点，灰色 S 标记为原方案已有。可编辑源文件：[`images/private-origin-architecture.drawio`](images/private-origin-architecture.drawio)。
+
 | 控制点 | 机制 |
 |---|---|
 | 无公网源站 | ALB `Scheme: internal`，位于无 NAT、无到 IGW 路由的隔离子网；DNS 只解析到私网 IP。VPC 挂一个 IGW 仅因为 VPC origin 要求如此，路由表并不指向它。 |
